@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频笔记到飞书"
+  short_description: "从飞书收集表读取 B站和抖音视频，整理图文笔记并回填进度与文档链接"
+  default_prompt: "使用 $video-to-feishu-notes 处理飞书视频收集表中的待整理任务，最多 3 条。"

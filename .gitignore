@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 config.json
+config.*.json
+!config.example.json
+*.log
 
 # Python environments and caches
 .venv/

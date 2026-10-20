@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "title": "演示笔记：如何组织课堂复习资料",
+  "summary": "这是中间格式演示，不是对来源视频的实际解读。",
+  "source_key": "bilibili:BV1Wv411h7kN:p19",
+  "sections": [
+    {
+      "id": "overview",
+      "title": "学习目标与知识地图",
+      "blocks": [
+        {"type": "text", "text": "演示：学习目标 → 核心概念 → 操作步骤 → 自测复习。正式笔记由 Agent 阅读真实素材后填写。"}
+      ]
+    },
+    {
+      "id": "concepts",
+      "title": "概念卡片",
+      "blocks": [
+        {"type": "bullet", "text": "来源引用：说明讲解或画面来自原视频的具体位置，实际时间从字幕或抽帧清单获得。"}
+      ]
+    },
+    {
+      "id": "quiz",
+      "title": "自测与参考答案",
+      "blocks": [
+        {"type": "text", "text": "问：为什么不能仅根据字幕流畅就确认术语正确？答：转写可能把专业词识别为常见词，需要结合上下文与画面核对。"}
+      ]
+    }
+  ]
+}

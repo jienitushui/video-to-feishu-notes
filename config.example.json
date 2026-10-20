@@ -1,0 +1,12 @@
+{
+  "base_url": "https://open.feishu.cn",
+  "app_token": "YOUR_BITABLE_APP_TOKEN",
+  "table_id": "YOUR_TABLE_ID",
+  "folder_token": "YOUR_DRIVE_FOLDER_TOKEN",
+  "document_url_prefix": "https://feishu.cn/docx/",
+  "template_version": "v1",
+  "language": "zh-CN",
+  "upstream_path": "cache/upstream",
+  "upstream_revision": "2497a7f564670c840f5e1c4055c8a536237cd5f3",
+  "fields": {}
+}
