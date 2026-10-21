@@ -13,6 +13,7 @@ FIELDS = {
     'title': ('视频标题', 1), 'platform': ('视频平台', 1),
     'category': ('学习分类', 1), 'requirements': ('笔记要求', 1),
     'document': ('笔记文档', 15), 'summary': ('内容摘要', 1),
+    'folder_document': ('云盘笔记', 15), 'wiki_document': ('知识库笔记', 15),
     'regenerate': ('重新生成', 7), 'completed_at': ('完成时间', 5),
     'error': ('错误信息', 1), 'result': ('结果来源', 1),
     'source_key': ('视频唯一标识', 1), 'fingerprint': ('输入指纹', 1),
@@ -27,8 +28,8 @@ class Config:
     def __init__(self, data, path=None):
         self.data = data
         self.path = Path(path).resolve() if path else ROOT / 'config.json'
-        if self.get('publish_target', 'folder') not in ('folder', 'wiki'):
-            raise ValueError('publish_target must be folder or wiki')
+        if self.get('publish_target', 'folder') not in ('folder', 'wiki', 'both'):
+            raise ValueError('publish_target must be folder, wiki or both')
         unknown = set(data.get('fields', {})) - set(FIELDS)
         if unknown:
             raise ValueError('Unknown field mappings: ' + ', '.join(sorted(unknown)))
@@ -59,10 +60,18 @@ class Config:
         return self.data.get('fields', {}).get(key, FIELDS[key][0])
 
     def destination(self):
-        if self.get('publish_target', 'folder') == 'wiki':
-            return {'type': 'wiki', 'space_id': str(self.require('wiki_space_id')),
-                    'parent_node_token': self.require('wiki_parent_node_token')}
-        return {'type': 'folder', 'folder_token': self.require('folder_token')}
+        mode = self.get('publish_target', 'folder')
+        targets = []
+        if mode in ('folder', 'both'):
+            targets.append({'type': 'folder', 'folder_token': self.require('folder_token')})
+        if mode in ('wiki', 'both'):
+            targets.append({'type': 'wiki', 'space_id': str(self.require('wiki_space_id')),
+                            'parent_node_token': self.require('wiki_parent_node_token')})
+        return {'type': 'both', 'targets': targets} if mode == 'both' else targets[0]
+
+    def destinations(self):
+        destination = self.destination()
+        return destination['targets'] if destination['type'] == 'both' else [destination]
 
     def local_path(self, key, default):
         path = Path(self.get(key, default)).expanduser()

@@ -51,18 +51,78 @@ class Publisher:
         destination = self.tasks.config.destination()
         if pub.get('destination') and pub['destination'] != destination:
             raise TaskError('Publication destination changed; restore the original config or regenerate a new version')
-        if pub and not pub.get('destination') and destination['type'] == 'wiki':
-            raise TaskError('Legacy folder draft cannot become a wiki draft; restore folder config or regenerate')
+        if pub and not pub.get('destination') and destination['type'] != 'folder':
+            raise TaskError('Legacy folder draft cannot change archive mode; restore folder config or regenerate')
         pub['destination'] = destination
         if pub.get('hash') and pub['hash'] != plan_hash:
             raise TaskError('Draft content or images changed; resume the original note or regenerate a new version')
         pub.update(hash=plan_hash, expected_blocks=len(plan))
-        document_id = self.tasks.get(task, 'document_id')
+        if destination['type'] == 'both':
+            targets = pub.setdefault('targets', {})
+            results = {}
+            for target in destination['targets']:
+                fresh = self.tasks.own(record_id, run_id)
+                self.tasks.assert_input(fresh, state)
+                target_pub = targets.setdefault(target['type'], {'destination': target})
+                result = self.publish_target(record_id, run_id, state, target_pub, target,
+                                             target_pub.get('document_id'), plan, plan_hash, note)
+                target_pub['published'] = result
+                label = '云盘' if target['type'] == 'folder' else '知识库'
+                self.tasks.save_state(record_id, state, stage=label + '已归档')
+                results[target['type']] = result
+            # Verify both results again after the last target finishes.
+            for target in destination['targets']:
+                result = results[target['type']]
+                self.verify_result(result, target, plan, targets[target['type']])
+            primary = results['wiki']
+            published = dict(primary, destination=destination, targets=results)
+        else:
+            document_id = pub.get('document_id') or self.tasks.get(task, 'document_id')
+            published = self.publish_target(record_id, run_id, state, pub, destination,
+                                            document_id, plan, plan_hash, note)
+        fresh = self.tasks.own(record_id, run_id)
+        self.tasks.assert_input(fresh, state)
+        state['published'] = published
+        self.tasks.save_state(record_id, state, status='已完成', stage='完成',
+                              **self.tasks.result_links(published, note['title']), summary=note['summary'],
+                              completed_at=int(time.time() * 1000), result='新生成', regenerate=False, error='')
+        return dict(published, record_id=record_id, status='已完成')
+
+    def save_target(self, record_id, state, pub, **values):
+        document_id = values.get('document_id')
+        if document_id:
+            pub['document_id'] = document_id
+        if state['publish'].get('destination', {}).get('type') == 'both':
+            if pub['destination']['type'] != 'folder':
+                values.pop('document_id', None)
+        return self.tasks.save_state(record_id, state, **values)
+
+    def verify_result(self, result, destination, plan, pub):
+        document_id = result['document_id']
+        self.api.document(document_id)
+        if destination['type'] == 'wiki':
+            self.check_wiki_node(self.api.wiki_node(result['wiki_node_token']), destination, document_id)
+        final = [b for b in self.api.children(document_id)
+                 if b.get('block_id') not in pub.get('starter_blocks', [])]
+        if len(final) != len(plan) or any(signature(a) != signature(b['block']) for a, b in zip(final, plan)):
+            raise TaskError('Final document block verification failed')
+        if any('path' in item and not block.get('image', {}).get('token') for block, item in zip(final, plan)):
+            raise TaskError('Image token missing after publication')
+
+    def publish_target(self, record_id, run_id, state, pub, destination, document_id, plan, plan_hash, note):
+        if pub.get('destination') != destination:
+            raise TaskError('Target checkpoint destination differs from configured destination')
+        if pub.get('published'):
+            result = pub['published']
+            if result.get('hash') != plan_hash or result.get('document_id') != document_id:
+                raise TaskError('Completed target checkpoint differs from this publication')
+            self.verify_result(result, destination, plan, pub)
+            return result
         if not document_id:
             if pub.get('creating'):
                 raise TaskError('Document creation outcome is unknown. Find the draft by its saved title and use attach-document; do not create another')
             pub.update(creating=True, title=note['title'] + ' [vfn:' + record_id + ':' + state['generation'][:8] + ']')
-            self.tasks.save_state(record_id, state, stage='创建文档')
+            self.save_target(record_id, state, pub, stage='创建文档')
             try:
                 if destination['type'] == 'wiki':
                     node = self.api.create_wiki_node(pub['title'])
@@ -74,11 +134,11 @@ class Publisher:
                 raise
             except FeishuError:
                 pub['creating'] = False
-                self.tasks.save_state(record_id, state)
+                self.save_target(record_id, state, pub)
                 raise
             pub['creating'] = False
             try:
-                self.tasks.save_state(record_id, state, document_id=document_id, stage='写入文档')
+                self.save_target(record_id, state, pub, document_id=document_id, stage='写入文档')
             except Exception as exc:
                 raise TaskError('Document created but checkpoint failed. Preserve and attach document ID: ' + document_id) from exc
         else:
@@ -97,7 +157,7 @@ class Publisher:
                     not r.get('text_run', {}).get('content', '') for r in existing[0].get('text', {}).get('elements', [])):
                 start = [existing[0]['block_id']]
             pub['starter_blocks'] = start
-            self.tasks.save_state(record_id, state, document_id=document_id)
+            self.save_target(record_id, state, pub, document_id=document_id)
         actual = [b for b in existing if b.get('block_id') not in start]
         if len(actual) > len(plan):
             raise TaskError('Draft contains extra blocks; inspect remote document before continuing')
@@ -111,14 +171,17 @@ class Publisher:
             if index < len(actual):
                 block = actual[index]
             else:
-                token = str(uuid.uuid5(uuid.NAMESPACE_URL, state['generation'] + ':' + plan_hash + ':' + str(index)))
+                scope = state['generation']
+                if state['publish']['destination']['type'] == 'both':
+                    scope += ':' + document_id
+                token = str(uuid.uuid5(uuid.NAMESPACE_URL, scope + ':' + plan_hash + ':' + str(index)))
                 block = self.api.append_block(document_id, item['block'], token)
                 actual.append(block)
             if 'path' in item and not block.get('image', {}).get('token'):
                 from pathlib import Path
                 self.api.upload_image(document_id, block['block_id'], Path(item['path']))
             pub['confirmed_blocks'] = index + 1
-            self.tasks.save_state(record_id, state, stage='写入文档')
+            self.save_target(record_id, state, pub, stage='写入文档')
         final = [b for b in self.api.children(document_id) if b.get('block_id') not in start]
         if len(final) != len(plan) or any(signature(a) != signature(b['block']) for a, b in zip(final, plan)):
             raise TaskError('Final document block verification failed')
@@ -137,26 +200,31 @@ class Publisher:
             prefix = self.tasks.config.get('document_url_prefix', 'https://feishu.cn/docx/')
             url = prefix.rstrip('/') + '/' + document_id
         published['url'] = url
-        fresh = self.tasks.own(record_id, run_id)
-        self.tasks.assert_input(fresh, state)
-        state['published'] = published
-        self.tasks.save_state(record_id, state, status='已完成', stage='完成',
-                              document={'link': url, 'text': note['title']}, summary=note['summary'],
-                              completed_at=int(time.time() * 1000), result='新生成', regenerate=False, error='')
-        return dict(published, record_id=record_id, status='已完成', blocks=len(final))
+        return dict(published, blocks=len(final))
 
-    def attach(self, record_id, run_id, document_id):
+    def attach(self, record_id, run_id, document_id, target=None):
         record = self.tasks.own(record_id, run_id)
         state = self.tasks.state(record)
         self.tasks.assert_input(record, state)
-        if self.tasks.get(record, 'document_id'):
+        root = state.get('publish', {})
+        configured = self.tasks.config.destination()
+        if root.get('destination') and root['destination'] != configured:
+            raise TaskError('Publication destination changed; restore the original config')
+        if configured['type'] == 'both':
+            if target not in ('folder', 'wiki'):
+                raise TaskError('attach-document requires --target folder or wiki in both mode')
+            destination = next(d for d in configured['targets'] if d['type'] == target)
+            pub = root.get('targets', {}).get(target, {})
+            attached = pub.get('document_id')
+        else:
+            if target and target != configured['type']:
+                raise TaskError('Attachment target differs from configured destination')
+            destination, pub = configured, root
+            attached = pub.get('document_id') or self.tasks.get(record, 'document_id')
+        if attached:
             raise TaskError('A document is already attached')
-        pub = state.get('publish', {})
         if not pub.get('creating') or not pub.get('title'):
             raise TaskError('No unresolved document creation')
-        destination = self.tasks.config.destination()
-        if pub.get('destination') and pub['destination'] != destination:
-            raise TaskError('Publication destination changed; restore the original config')
         if destination['type'] == 'wiki':
             if not pub.get('destination'):
                 raise TaskError('Legacy folder draft cannot become a wiki draft')
@@ -169,5 +237,5 @@ class Publisher:
                for e in b.get('text', {}).get('elements', [])) for b in children):
             raise TaskError('Expected an empty draft; inspect its content before attaching')
         pub['creating'] = False
-        self.tasks.save_state(record_id, state, document_id=document_id)
+        self.save_target(record_id, state, pub, document_id=document_id)
         return {'record_id': record_id, 'document_id': document_id, 'attached': True}

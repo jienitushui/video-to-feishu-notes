@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
 from vfnlib.config import Config
-from vfnlib.feishu import AmbiguousWrite
+from vfnlib.feishu import AmbiguousWrite, FeishuError
 from vfnlib.notes import load_note, validate_note
 from vfnlib.publish import Publisher
 from vfnlib.tasks import Tasks, TaskError
@@ -23,6 +23,7 @@ class MemoryFeishu:
         self.wiki_nodes = {}
         self.tokens = {}
         self.fail_append_at = None
+        self.fail_append_document = None
         self.fail_complete = False
         self.ambiguous_create = False
         self.lose_checkpoint = False
@@ -87,7 +88,7 @@ class MemoryFeishu:
         block = dict(copy.deepcopy(block), block_id='b' + str(len(blocks) + 1))
         blocks.append(block)
         self.tokens[token] = block
-        if self.fail_append_at == len(blocks):
+        if self.fail_append_at == len(blocks) and self.fail_append_document in (None, document_id):
             self.fail_append_at = None
             raise AmbiguousWrite('append accepted but response lost')
         return copy.deepcopy(block)
@@ -131,6 +132,183 @@ class WorkflowTests(unittest.TestCase):
         self.config.data.update(publish_target='wiki', wiki_space_id='123',
                                 wiki_parent_node_token='parent', wiki_url_prefix='https://example.feishu.cn/wiki/')
         self.config.data.pop('folder_token', None)
+
+    def use_both(self):
+        self.use_wiki()
+        self.config.data.update(publish_target='both', folder_token='folder')
+
+    def test_both_creates_two_independent_copies_and_returns_both_links(self):
+        self.use_both()
+        result = self.publish(self.bound())
+        self.assertEqual(len(self.api.docs), 2)
+        self.assertEqual(result['targets']['folder']['document_id'], 'doc1')
+        self.assertEqual(result['targets']['wiki']['document_id'], 'doc2')
+        self.assertEqual(result['url'], result['targets']['wiki']['url'])
+        self.assertEqual(result['targets']['folder']['hash'], result['targets']['wiki']['hash'])
+        self.assertEqual(self.api.docs['doc1']['blocks'], self.api.docs['doc2']['blocks'])
+        fields = self.api.rows['rec1']['fields']
+        self.assertEqual(fields['云盘笔记']['link'], result['targets']['folder']['url'])
+        self.assertEqual(fields['知识库笔记']['link'], result['targets']['wiki']['url'])
+        self.assertEqual(fields['工作文档ID'], 'doc1')
+        self.assertEqual(fields['处理状态'], '已完成')
+
+    def test_both_wiki_failure_preserves_folder_and_resumes_only_pending_target(self):
+        from unittest.mock import patch
+        self.use_both()
+        run = self.bound()
+        with patch.object(self.api, 'create_wiki_node', side_effect=FeishuError('permission denied')):
+            with self.assertRaises(FeishuError):
+                self.publish(run)
+        state = self.tasks.state(self.api.record('rec1'))
+        self.assertIn('published', state['publish']['targets']['folder'])
+        self.assertEqual(self.tasks.get(self.api.record('rec1'), 'status'), '处理中')
+        self.assertIsNone(self.tasks.get(self.api.record('rec1'), 'document'))
+        self.tasks.fail('rec1', run, 'permission denied', manual=True)
+        run = self.tasks.claim('rec1', retry=True)['run_id']
+        append = self.api.append_block
+
+        def append_pending(document_id, block, token):
+            self.assertNotEqual(document_id, 'doc1', 'completed folder copy must not be appended again')
+            return append(document_id, block, token)
+
+        with patch.object(self.api, 'append_block', side_effect=append_pending):
+            self.publish(run)
+        self.assertEqual(len(self.api.docs), 2)
+
+    def test_both_lost_wiki_append_resumes_without_duplicate_blocks(self):
+        self.use_both()
+        run = self.bound()
+        self.api.fail_append_at, self.api.fail_append_document = 3, 'doc2'
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        self.publish(self.tasks.claim('rec1', resume=True)['run_id'])
+        self.assertEqual([len(d['blocks']) for d in self.api.docs.values()], [7, 7])
+
+    def test_both_unknown_wiki_creation_requires_target_specific_attachment(self):
+        from unittest.mock import patch
+        self.use_both()
+        run = self.bound()
+        create = self.api.create_wiki_node
+
+        def lost(title):
+            create(title)
+            raise AmbiguousWrite('wiki node accepted but response lost')
+
+        with patch.object(self.api, 'create_wiki_node', side_effect=lost):
+            with self.assertRaises(AmbiguousWrite):
+                self.publish(run)
+        with self.assertRaisesRegex(TaskError, 'creation outcome is unknown'):
+            self.publish(run)
+        with self.assertRaisesRegex(TaskError, 'requires --target'):
+            self.publisher.attach('rec1', run, 'doc2')
+        with self.assertRaisesRegex(TaskError, 'already attached'):
+            self.publisher.attach('rec1', run, 'doc2', target='folder')
+        self.publisher.attach('rec1', run, 'doc2', target='wiki')
+        self.publish(run)
+        self.assertEqual(len(self.api.docs), 2)
+
+    def test_both_unknown_folder_creation_attaches_before_creating_wiki(self):
+        self.use_both()
+        run = self.bound()
+        self.api.ambiguous_create = True
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        self.assertFalse(self.api.wiki_nodes)
+        self.publisher.attach('rec1', run, 'doc1', target='folder')
+        self.publish(run)
+        self.assertEqual(len(self.api.docs), 2)
+
+    def test_both_wiki_checkpoint_failure_recovers_without_new_document(self):
+        from unittest.mock import patch
+        self.use_both()
+        run = self.bound()
+        update = self.api.update_record
+
+        def lose_wiki_checkpoint(record_id, fields):
+            state = json.loads(fields.get('任务检查点', '{}'))
+            if state.get('publish', {}).get('targets', {}).get('wiki', {}).get('document_id'):
+                raise RuntimeError('wiki checkpoint rejected')
+            return update(record_id, fields)
+
+        with patch.object(self.api, 'update_record', side_effect=lose_wiki_checkpoint):
+            with self.assertRaisesRegex(TaskError, 'doc2'):
+                self.publish(run)
+        self.publisher.attach('rec1', run, 'doc2', target='wiki')
+        self.publish(run)
+        self.assertEqual(len(self.api.docs), 2)
+
+    def test_both_images_and_final_table_update_resume_without_new_uploads(self):
+        self.use_both()
+        (self.base / 'frame.png').write_bytes(b'image fixture')
+        self.note['sections'][0]['blocks'].append({'type': 'image', 'path': 'frame.png',
+                                                  'caption': 'A frame', 'seconds': 5})
+        run = self.bound()
+        self.api.fail_complete = True
+        with self.assertRaises(RuntimeError):
+            self.publish(run)
+        self.assertEqual(self.api.image_uploads, 2)
+        self.publish(run)
+        self.assertEqual(self.api.image_uploads, 2)
+        self.assertEqual(len(self.api.docs), 2)
+
+    def test_both_reuse_requires_both_accessible_documents(self):
+        self.use_both()
+        self.publish(self.bound())
+        self.api.add('rec2')
+        self.bound('rec2')
+        self.assertEqual(self.tasks.get(self.api.record('rec2'), 'status'), '已完成')
+        for field in ('云盘笔记', '知识库笔记'):
+            self.assertEqual(self.api.rows['rec1']['fields'][field]['link'], self.api.rows['rec2']['fields'][field]['link'])
+        del self.api.docs['doc1']
+        self.api.add('rec3')
+        self.bound('rec3')
+        self.assertEqual(self.tasks.get(self.api.record('rec3'), 'status'), '处理中')
+
+    def test_both_regeneration_keeps_both_previous_links_until_complete(self):
+        self.use_both()
+        self.publish(self.bound())
+        old = copy.deepcopy(self.api.rows['rec1']['fields'])
+        run = self.bound(regenerate=True)
+        self.api.fail_append_at, self.api.fail_append_document = 2, 'doc4'
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        for field in ('笔记文档', '云盘笔记', '知识库笔记'):
+            self.assertEqual(self.api.rows['rec1']['fields'][field], old[field])
+        self.publish(run)
+        for field in ('笔记文档', '云盘笔记', '知识库笔记'):
+            self.assertNotEqual(self.api.rows['rec1']['fields'][field], old[field])
+        self.assertEqual(len(self.api.docs), 4)
+
+    def test_both_changed_config_or_notes_preserve_completed_copy(self):
+        from unittest.mock import patch
+        self.use_both()
+        run = self.bound()
+        with patch.object(self.api, 'create_wiki_node', side_effect=FeishuError('temporarily unavailable')):
+            with self.assertRaises(FeishuError):
+                self.publish(run)
+        self.config.data['folder_token'] = 'other-folder'
+        with self.assertRaisesRegex(TaskError, 'destination changed'):
+            self.publish(run)
+        self.config.data['folder_token'] = 'folder'
+        self.note['summary'] = 'Changed'
+        with self.assertRaisesRegex(TaskError, 'content or images changed'):
+            self.publish(run)
+        self.assertEqual(len(self.api.docs), 1)
+
+    def test_both_completed_folder_edited_during_wiki_publication_blocks_completion(self):
+        from unittest.mock import patch
+        self.use_both()
+        run = self.bound()
+        create = self.api.create_wiki_node
+
+        def edit_folder(title):
+            self.api.docs['doc1']['blocks'][0]['text']['elements'][0]['text_run']['content'] = 'manual edit'
+            return create(title)
+
+        with patch.object(self.api, 'create_wiki_node', side_effect=edit_folder):
+            with self.assertRaisesRegex(TaskError, 'verification failed'):
+                self.publish(run)
+        self.assertEqual(self.tasks.get(self.api.record('rec1'), 'status'), '处理中')
 
     def test_wiki_publication_returns_node_link_and_reuses_result(self):
         self.use_wiki()

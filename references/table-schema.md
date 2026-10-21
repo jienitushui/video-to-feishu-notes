@@ -11,6 +11,8 @@ CLI 在现有表内创建下列字段，不创建新的 Base，不自动修改�
 | title / platform | 视频标题 / 视频平台 | 文本 1 | 元数据 |
 | category / requirements | 学习分类 / 笔记要求 | 文本 1 | 首版分类精确匹配文本 |
 | document | 笔记文档 | 超链接 15 | 最近成功版本 |
+| folder_document | 云盘笔记 | 超链接 15 | 最近成功版本的云盘文档链接 |
+| wiki_document | 知识库笔记 | 超链接 15 | 最近成功版本的知识库页面链接 |
 | summary | 内容摘要 | 文本 1 | 最近成功版本摘要 |
 | regenerate | 重新生成 | 复选框 7 | 新版本不覆盖旧文档 |
 | completed_at | 完成时间 | 日期 5 | 毫秒 Unix 时间 |
@@ -26,7 +28,7 @@ CLI 在现有表内创建下列字段，不创建新的 Base，不自动修改�
 
     "fields": {"url": "原视频", "document": "课堂笔记", "state": "系统检查点"}
 
-检查点保存 input、generation、run_id、source、fingerprint、publish、published。input 包含原始链接、笔记要求、模板版本和输出语言。publish 保存内容哈希、创建尝试、标题、已写数量、destination（归档目标）；wiki 模式另存 wiki_node（node_token 与 obj_token）。published 保存已成功文档 ID、URL、哈希、destination 及可选 wiki_node_token；复用时记录来源。工作文档ID始终存正文 document_id，知识库链接使用节点 token。无需额外建列存知识库检查点。不要放完整字幕、图片字节或凭据。
+检查点保存 input、generation、run_id、source、fingerprint、publish、published。input 包含原始链接、笔记要求、模板版本和输出语言。publish 保存内容哈希、创建尝试、标题、已写数量、destination（归档目标）；wiki 模式另存 wiki_node（node_token 与 obj_token）。published 保存已成功文档 ID、URL、哈希、destination 及可选 wiki_node_token；复用时记录来源。both 模式由 publish.targets.folder/wiki 分别保存创建、正文 ID、块进度和已校验结果，published.targets 保留两处最终结果；工作文档ID存云盘正文 ID，知识库正文 ID存检查点。知识库链接使用节点 token；“笔记文档”在 both 模式默认指向知识库。双归档必须两处成功后统一回填三列，任一处未完成不清除上一成功版本链接。单归档成功会清空未使用的另一链接列，防止混淆版本。不要放完整字幕、图片字节或凭据。
 
 默认筛选 enabled=true、有链接、待处理；已完成且重新生成=true 也可入队。明确重试时才纳入失败记录。空状态视为待处理；分类为精确文本匹配。
 

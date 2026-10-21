@@ -132,9 +132,9 @@ class Feishu:
                             params={'token': token, 'obj_type': obj_type})['node']
 
     def create_wiki_node(self, title):
-        destination = self.config.destination()
-        if destination['type'] != 'wiki':
-            raise ValueError('Configure publish_target=wiki before creating a wiki node')
+        destination = next((d for d in self.config.destinations() if d['type'] == 'wiki'), None)
+        if not destination:
+            raise ValueError('Configure publish_target=wiki or both before creating a wiki node')
         return self.request('POST', '/wiki/v2/spaces/{}/nodes'.format(
             quote(destination['space_id'], safe='')), body={
                 'obj_type': 'docx', 'node_type': 'origin', 'title': title,
@@ -142,6 +142,11 @@ class Feishu:
 
     def check_destination(self):
         destination = self.config.destination()
+        if destination['type'] == 'both':
+            return {'type': 'both', 'targets': [self._check_destination(d) for d in destination['targets']]}
+        return self._check_destination(destination)
+
+    def _check_destination(self, destination):
         if destination['type'] == 'wiki':
             node = self.wiki_node(destination['parent_node_token'])
             if (str(node.get('space_id')) != destination['space_id'] or

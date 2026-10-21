@@ -142,6 +142,28 @@ class Tasks:
                              'error': message[:2000], 'updated_at': int(time.time() * 1000)})
         return {'record_id': record_id, 'error': message}
 
+    @staticmethod
+    def result_targets(published):
+        destination = published['destination']
+        if destination['type'] == 'both':
+            targets = published.get('targets', {})
+            if set(targets) != {'folder', 'wiki'}:
+                raise TaskError('Dual archive result is incomplete')
+            for target in destination['targets']:
+                result = targets[target['type']]
+                if result.get('destination') != target or result.get('hash') != published.get('hash'):
+                    raise TaskError('Dual archive result does not match its destination or content')
+            return targets
+        return {destination['type']: published}
+
+    def result_links(self, published, title):
+        targets = self.result_targets(published)
+        values = {'document': {'link': published['url'], 'text': title}}
+        for target in ('folder', 'wiki'):
+            result = targets.get(target)
+            values[target + '_document'] = {'link': result['url'], 'text': title} if result else None
+        return values
+
     def bind(self, record_id, run_id, manifest):
         record = self.own(record_id, run_id)
         state = self.state(record)
@@ -171,21 +193,23 @@ class Tasks:
                 if published.get('destination') != self.config.destination():
                     continue
                 try:
-                    self.api.document(published['document_id'])
-                    if published['destination']['type'] == 'wiki':
-                        from .publish import Publisher
-                        node = self.api.wiki_node(published['wiki_node_token'])
-                        Publisher.check_wiki_node(node, published['destination'], published['document_id'])
+                    for result in self.result_targets(published).values():
+                        self.api.document(result['document_id'])
+                        if result['destination']['type'] == 'wiki':
+                            from .publish import Publisher
+                            node = self.api.wiki_node(result['wiki_node_token'])
+                            Publisher.check_wiki_node(node, result['destination'], result['document_id'])
                 except Exception:
                     continue
                 fresh = self.own(record_id, run_id)
                 self.assert_input(fresh, state)
                 state['published'] = dict(published, reused_from=other['record_id'])
                 self.save_state(record_id, state, status='已完成', stage='完成', result='复用已有笔记',
-                                document={'link': published['url'], 'text': source['title']},
+                                **self.result_links(published, source['title']),
                                 summary=text(self.get(other, 'summary')), completed_at=int(time.time() * 1000),
                                 regenerate=False, error='')
-                return {'record_id': record_id, 'reused': True, 'url': published['url']}
+                return {'record_id': record_id, 'reused': True, 'url': published['url'],
+                        'targets': self.result_targets(published)}
         return {'record_id': record_id, 'reused': False, 'fingerprint': fingerprint}
 
     def schema(self, apply=False):

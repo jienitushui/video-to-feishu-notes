@@ -24,10 +24,10 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 - app_token：多维表格应用标识，来自 /base/<app_token> 链接，不是 API access token。知识库页面需先解析实际表格标识。
 - table_id：任务数据表 ID。
-- publish_target：wiki（知识库，示例默认）或 folder（云盘文件夹）。旧配置未填写时按 folder 处理。
-- wiki_space_id、wiki_parent_node_token：wiki 模式必填，分别为知识空间 ID 和归档父页面的节点 token。此模式无需 folder_token。
-- wiki_url_prefix：wiki 模式回填链接前缀，建议使用租户的 https://<租户域名>/wiki/。
-- folder_token：仅 folder 模式必填，为目标云盘文件夹标识。
+- publish_target：folder（仅云盘）、wiki（仅知识库）或 both（两处归档，示例默认）。旧配置未填写时按 folder 处理。
+- wiki_space_id、wiki_parent_node_token：wiki/both 模式必填，分别为知识空间 ID 和归档父页面的节点 token。仅 wiki 模式无需 folder_token。
+- wiki_url_prefix：wiki/both 模式回填链接前缀，建议使用租户的 https://<租户域名>/wiki/。
+- folder_token：folder/both 模式必填，为目标云盘文件夹标识。
 - document_url_prefix：建议使用租户的 https://<租户域名>/docx/。
 - upstream_path：视频工具目录，相对配置文件所在目录解析。
 - fields：可选字段名映射，见 table-schema.md。
@@ -41,7 +41,7 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 不要将真实密钥提交到 Git，或写入命令参数。config.json 已被忽略，仍应仅存放资源标识与非敏感设置。CLI 不自动读取 .env。
 
-在飞书开放平台发布应用并配置所需权限。所需能力包括：读取及更新多维表格记录、读取及新增字段（仅初始化时）、创建/读取/编辑新版云文档、上传文档素材；wiki 模式另需读取知识库节点和创建子节点，folder 模式的远程检查需要列举文件夹内容。具体 scope 名称以实际接口要求为准。目标表格、知识库目录或文件夹还需要调用身份的实际协作访问权，开通 API 权限不等于可访问所有文件。
+在飞书开放平台发布应用并配置所需权限。所需能力包括：读取及更新多维表格记录、读取及新增字段（仅初始化时）、创建/读取/编辑新版云文档、上传文档素材；wiki/both 模式另需读取知识库节点和创建子节点，folder/both 模式的远程检查需要列举文件夹内容。具体 scope 名称以实际接口要求为准。目标表格、知识库目录或文件夹还需要调用身份的实际协作访问权，开通 API 权限不等于可访问所有文件。
 
 ## 选择知识库目录
 
@@ -68,6 +68,25 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 若使用云盘，设置 publish_target 为 folder 并填写 folder_token 即可。更改目标后，已完成任务默认仍跳过；需要在新目标重新生成的记录须明确请求重新生成。新任务只复用同一目标目录中的笔记。旧版本缺少归档元数据的结果不参与自动复用；旧云盘草稿可继续以 folder 模式恢复。
 
+## 同时归档到云盘和知识库
+
+将 publish_target 设为 both，并同时填写 folder_token、wiki_space_id、wiki_parent_node_token。笔记只生成一次，然后先写云盘在线文档，再写知识库在线文档；两份有独立的正文 ID 和访问权限。正文与图片来自同一 note.json，不是把同一个文档移动到两个位置，也不是上传 Markdown 文件。发布后人工编辑不会在两份之间自动同步。
+
+```json
+{
+  "publish_target": "both",
+  "folder_token": "云盘文件夹token",
+  "wiki_space_id": "1234567890123456789",
+  "wiki_parent_node_token": "知识库父页面token",
+  "document_url_prefix": "https://你的租户.feishu.cn/docx/",
+  "wiki_url_prefix": "https://你的租户.feishu.cn/wiki/"
+}
+```
+
+已有表格先执行 schema --apply 补齐“云盘笔记”和“知识库笔记”超链接字段。两处都成功并回读验证后，才回填两列并标记已完成，“笔记文档”默认指向知识库。仅云盘/仅知识库模式也填写对应链接列，另一列清空。新版本未完成前保留上次成功的所有链接；部分成功可从 show 的任务检查点和“当前阶段”查看。
+
+一处失败不回滚已完成文档；修复权限或网络后明确重试，工具校验已完成副本，只继续缺失部分。两份都可访问且归档目标完全相同时才允许整体复用。现有单归档已完成结果不会因改为 both 自动补一份，需要明确重新生成；同一代中途改模式或目录会停止。
+
 ## 初始化表格
 
     python scripts/vfn.py doctor
@@ -77,7 +96,7 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 schema 默认只返回缺失字段；--apply 创建缺失字段，不删除已有字段。已有同名字段类型不兼容时停止，可配置 fields 映射。表格视图、隐藏列和展示顺序由用户按偏好调整。
 
-doctor --remote 只读检查表格字段及目标目录：wiki 模式校验父节点所属知识空间，folder 模式列举文件夹。读取成功不代表有创建权限，报告中 write_access_checked 为 false；首次实际发布再验证写入。
+doctor --remote 只读检查表格字段及目标目录：wiki 模式校验父节点所属知识空间，folder 模式列举文件夹，both 模式分别检查两处。读取成功不代表有创建权限，报告中 write_access_checked 为 false；首次实际发布再验证写入。
 
 API 回读只能确认当前调用身份可访问。首次发布后请用户实际打开文档，确认知识库或文件夹的成员权限满足阅读需求。工具不会自动公开分享。
 

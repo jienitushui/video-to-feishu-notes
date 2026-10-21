@@ -108,6 +108,27 @@ class FeishuTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'publish_target'):
             Config({'publish_target': 'unknown'})
 
+    def test_both_preflight_checks_folder_and_wiki_without_writes(self):
+        api, session = self.api([Response({'data': {'files': []}}), Response({'data': {
+            'node': {'node_token': 'parent', 'space_id': '123'}}})])
+        api.config.data.update(publish_target='both', folder_token='folder',
+                               wiki_space_id='123', wiki_parent_node_token='parent')
+        result = api.check_destination()
+        self.assertEqual([t['type'] for t in result['targets']], ['folder', 'wiki'])
+        self.assertTrue(all(t['readable'] and not t['write_access_checked'] for t in result['targets']))
+        self.assertTrue(all(call[0] == 'GET' for call in session.calls))
+        self.assertEqual(session.calls[0][2]['params']['folder_token'], 'folder')
+
+    def test_both_requires_both_resource_configs_and_supports_native_wiki_creation(self):
+        config = Config({'publish_target': 'both', 'folder_token': 'folder', 'wiki_space_id': '123'})
+        with self.assertRaisesRegex(ValueError, 'wiki_parent_node_token'):
+            config.destination()
+        api, session = self.api([Response({'data': {'node': {'node_token': 'wiki1', 'obj_token': 'doc2'}}})])
+        api.config.data.update(publish_target='both', folder_token='folder',
+                               wiki_space_id='123', wiki_parent_node_token='parent')
+        self.assertEqual(api.create_wiki_node('Title')['obj_token'], 'doc2')
+        self.assertEqual(session.calls[0][2]['json']['parent_node_token'], 'parent')
+
     def test_record_pagination_and_missing_page_token(self):
         api, session = self.api([
             Response({'code': 0, 'data': {'items': [{'record_id': 'r1'}], 'has_more': True, 'page_token': 'p2'}}),

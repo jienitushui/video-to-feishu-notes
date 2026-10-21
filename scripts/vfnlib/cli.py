@@ -57,6 +57,8 @@ def parser():
             cmd.add_argument('--note', required=True)
         else:
             cmd.add_argument('--document-id', required=True)
+            cmd.add_argument('--target', choices=('folder', 'wiki'),
+                             help='Required for attach-document in both mode')
     note = sub.add_parser('validate-note')
     note.add_argument('note')
     export = sub.add_parser('render-markdown')
@@ -95,7 +97,12 @@ def execute(args):
     api = Feishu(config)
     tasks = Tasks(api, config)
     if cmd == 'doctor':
-        destination_keys = ('wiki_space_id', 'wiki_parent_node_token') if config.get('publish_target') == 'wiki' else ('folder_token',)
+        mode = config.get('publish_target', 'folder')
+        destination_keys = []
+        if mode in ('wiki', 'both'):
+            destination_keys.extend(('wiki_space_id', 'wiki_parent_node_token'))
+        if mode in ('folder', 'both'):
+            destination_keys.append('folder_token')
         configured = all(config.get(k) and not str(config.get(k)).startswith('YOUR_')
                          for k in ('app_token', 'table_id', *destination_keys))
         auth = bool((os.getenv('FEISHU_APP_ID') and os.getenv('FEISHU_APP_SECRET')) or
@@ -142,7 +149,7 @@ def execute(args):
         note, base = load_note(args.note)
         return Publisher(tasks).publish(args.record_id, args.run_id, note, base)
     if cmd == 'attach-document':
-        return Publisher(tasks).attach(args.record_id, args.run_id, args.document_id)
+        return Publisher(tasks).attach(args.record_id, args.run_id, args.document_id, args.target)
     raise ValueError('Unknown command')
 
 
