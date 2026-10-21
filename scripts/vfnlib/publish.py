@@ -67,7 +67,7 @@ class Publisher:
                 result = self.publish_target(record_id, run_id, state, target_pub, target,
                                              target_pub.get('document_id'), plan, plan_hash, note)
                 target_pub['published'] = result
-                label = '云盘' if target['type'] == 'folder' else '知识库'
+                label = '云盘生成备份' if target['type'] == 'folder' else '知识库主文档'
                 self.tasks.save_state(record_id, state, stage=label + '已归档')
                 results[target['type']] = result
             # Verify both results again after the last target finishes.
@@ -112,6 +112,8 @@ class Publisher:
     def publish_target(self, record_id, run_id, state, pub, destination, document_id, plan, plan_hash, note):
         if pub.get('destination') != destination:
             raise TaskError('Target checkpoint destination differs from configured destination')
+        dual = state['publish']['destination']['type'] == 'both'
+        label = ('云盘生成备份' if destination['type'] == 'folder' else '知识库主文档') if dual else '文档'
         if pub.get('published'):
             result = pub['published']
             if result.get('hash') != plan_hash or result.get('document_id') != document_id:
@@ -121,8 +123,9 @@ class Publisher:
         if not document_id:
             if pub.get('creating'):
                 raise TaskError('Document creation outcome is unknown. Find the draft by its saved title and use attach-document; do not create another')
-            pub.update(creating=True, title=note['title'] + ' [vfn:' + record_id + ':' + state['generation'][:8] + ']')
-            self.save_target(record_id, state, pub, stage='创建文档')
+            title = note['title'] + (' [生成备份]' if dual and destination['type'] == 'folder' else '')
+            pub.update(creating=True, title=title + ' [vfn:' + record_id + ':' + state['generation'][:8] + ']')
+            self.save_target(record_id, state, pub, stage='创建' + label)
             try:
                 if destination['type'] == 'wiki':
                     node = self.api.create_wiki_node(pub['title'])
@@ -138,7 +141,7 @@ class Publisher:
                 raise
             pub['creating'] = False
             try:
-                self.save_target(record_id, state, pub, document_id=document_id, stage='写入文档')
+                self.save_target(record_id, state, pub, document_id=document_id, stage='写入' + label)
             except Exception as exc:
                 raise TaskError('Document created but checkpoint failed. Preserve and attach document ID: ' + document_id) from exc
         else:
@@ -181,7 +184,7 @@ class Publisher:
                 from pathlib import Path
                 self.api.upload_image(document_id, block['block_id'], Path(item['path']))
             pub['confirmed_blocks'] = index + 1
-            self.save_target(record_id, state, pub, stage='写入文档')
+            self.save_target(record_id, state, pub, stage='写入' + label)
         final = [b for b in self.api.children(document_id) if b.get('block_id') not in start]
         if len(final) != len(plan) or any(signature(a) != signature(b['block']) for a, b in zip(final, plan)):
             raise TaskError('Final document block verification failed')

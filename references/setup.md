@@ -24,7 +24,7 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 - app_token：多维表格应用标识，来自 /base/<app_token> 链接，不是 API access token。知识库页面需先解析实际表格标识。
 - table_id：任务数据表 ID。
-- publish_target：folder（仅云盘）、wiki（仅知识库）或 both（两处归档，示例默认）。旧配置未填写时按 folder 处理。
+- publish_target：folder（仅云盘）、wiki（仅知识库）或 both（知识库主文档 + 云盘生成备份，示例默认）。旧配置未填写时按 folder 处理。
 - wiki_space_id、wiki_parent_node_token：wiki/both 模式必填，分别为知识空间 ID 和归档父页面的节点 token。仅 wiki 模式无需 folder_token。
 - wiki_url_prefix：wiki/both 模式回填链接前缀，建议使用租户的 https://<租户域名>/wiki/。
 - folder_token：folder/both 模式必填，为目标云盘文件夹标识。
@@ -68,9 +68,11 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 若使用云盘，设置 publish_target 为 folder 并填写 folder_token 即可。更改目标后，已完成任务默认仍跳过；需要在新目标重新生成的记录须明确请求重新生成。新任务只复用同一目标目录中的笔记。旧版本缺少归档元数据的结果不参与自动复用；旧云盘草稿可继续以 folder 模式恢复。
 
-## 同时归档到云盘和知识库
+## 知识库主文档与云盘生成备份
 
-将 publish_target 设为 both，并同时填写 folder_token、wiki_space_id、wiki_parent_node_token。笔记只生成一次，然后先写云盘在线文档，再写知识库在线文档；两份有独立的正文 ID 和访问权限。正文与图片来自同一 note.json，不是把同一个文档移动到两个位置，也不是上传 Markdown 文件。发布后人工编辑不会在两份之间自动同步。
+将 publish_target 设为 both，并同时填写 folder_token、wiki_space_id、wiki_parent_node_token。笔记只生成一次：知识库文档作为日常阅读和编辑的主文档，云盘文档作为生成时的备份。发布工具先写云盘备份，再写知识库主文档；两份有独立的正文 ID 和访问权限，正文与图片来自同一 note.json。新云盘副本的标题标注“生成备份”，仅归档图文笔记，不上传原视频和完整中间素材。
+
+完成后主文档的手动修改不会更新或覆盖生成备份，已完成任务默认跳过。需要重新生成时创建新主文档和新备份，旧文档保留；这不能代替对手动修改的备份。当前 CLI 没有“备份编辑后的主文档”命令，不能将重新生成视频笔记当作备份手动修改。
 
 ```json
 {
@@ -83,7 +85,9 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 }
 ```
 
-已有表格先执行 schema --apply 补齐“云盘笔记”和“知识库笔记”超链接字段。两处都成功并回读验证后，才回填两列并标记已完成，“笔记文档”默认指向知识库。仅云盘/仅知识库模式也填写对应链接列，另一列清空。新版本未完成前保留上次成功的所有链接；部分成功可从 show 的任务检查点和“当前阶段”查看。
+表格使用两个超链接字段：“笔记文档”指向知识库主文档，“备份文档”指向云盘生成备份。两处都成功并回读验证后，才统一回填并标记已完成。仅云盘/仅知识库模式将对应文档写入“笔记文档”，“备份文档”清空，避免把主文档自身当作备份。新版本未完成前保留上次成功的两个链接；部分成功可从 show 的任务检查点和“当前阶段”查看。
+
+旧表迁移：将原“云盘笔记”重命名为“备份文档”，保留其中已有链接；原“笔记文档”已指向知识库，可继续使用，原“知识库笔记”可隐藏。执行 schema --apply 补齐缺失字段；此命令不重命名、删除字段，也不回填历史记录链接。不方便改字段名时可配置 `"fields": {"folder_document": "云盘笔记"}`，新结果的备份仍回填原列。若还需维护旧“知识库笔记”列，可额外映射 `"wiki_document": "知识库笔记"`；只有显式配置时才检查并更新该兼容列，新表默认不创建它。上述映射需与已有 fields 合并。
 
 一处失败不回滚已完成文档；修复权限或网络后明确重试，工具校验已完成副本，只继续缺失部分。两份都可访问且归档目标完全相同时才允许整体复用。现有单归档已完成结果不会因改为 both 自动补一份，需要明确重新生成；同一代中途改模式或目录会停止。
 

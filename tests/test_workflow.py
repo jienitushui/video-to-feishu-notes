@@ -146,9 +146,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result['url'], result['targets']['wiki']['url'])
         self.assertEqual(result['targets']['folder']['hash'], result['targets']['wiki']['hash'])
         self.assertEqual(self.api.docs['doc1']['blocks'], self.api.docs['doc2']['blocks'])
+        self.assertIn('[生成备份]', self.api.docs['doc1']['title'])
+        self.assertNotIn('[生成备份]', self.api.docs['doc2']['title'])
         fields = self.api.rows['rec1']['fields']
-        self.assertEqual(fields['云盘笔记']['link'], result['targets']['folder']['url'])
-        self.assertEqual(fields['知识库笔记']['link'], result['targets']['wiki']['url'])
+        self.assertEqual(fields['备份文档']['link'], result['targets']['folder']['url'])
+        self.assertEqual(fields['笔记文档']['link'], result['targets']['wiki']['url'])
+        self.assertNotIn('知识库笔记', fields)
+        self.assertNotIn('云盘笔记', fields)
         self.assertEqual(fields['工作文档ID'], 'doc1')
         self.assertEqual(fields['处理状态'], '已完成')
 
@@ -257,7 +261,7 @@ class WorkflowTests(unittest.TestCase):
         self.api.add('rec2')
         self.bound('rec2')
         self.assertEqual(self.tasks.get(self.api.record('rec2'), 'status'), '已完成')
-        for field in ('云盘笔记', '知识库笔记'):
+        for field in ('笔记文档', '备份文档'):
             self.assertEqual(self.api.rows['rec1']['fields'][field]['link'], self.api.rows['rec2']['fields'][field]['link'])
         del self.api.docs['doc1']
         self.api.add('rec3')
@@ -272,10 +276,10 @@ class WorkflowTests(unittest.TestCase):
         self.api.fail_append_at, self.api.fail_append_document = 2, 'doc4'
         with self.assertRaises(AmbiguousWrite):
             self.publish(run)
-        for field in ('笔记文档', '云盘笔记', '知识库笔记'):
+        for field in ('笔记文档', '备份文档'):
             self.assertEqual(self.api.rows['rec1']['fields'][field], old[field])
         self.publish(run)
-        for field in ('笔记文档', '云盘笔记', '知识库笔记'):
+        for field in ('笔记文档', '备份文档'):
             self.assertNotEqual(self.api.rows['rec1']['fields'][field], old[field])
         self.assertEqual(len(self.api.docs), 4)
 
@@ -309,6 +313,56 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(TaskError, 'verification failed'):
                 self.publish(run)
         self.assertEqual(self.tasks.get(self.api.record('rec1'), 'status'), '处理中')
+
+    def test_completed_main_can_be_edited_without_replacing_generation_backup(self):
+        self.use_both()
+        run = self.bound()
+        result = self.publish(run)
+        folder_id = result['targets']['folder']['document_id']
+        wiki_id = result['targets']['wiki']['document_id']
+        backup = copy.deepcopy(self.api.docs[folder_id])
+        self.api.docs[wiki_id]['blocks'][0]['text']['elements'][0]['text_run']['content'] = 'My learning notes'
+        self.assertEqual(self.tasks.select(), [])
+        with self.assertRaisesRegex(TaskError, 'not owned'):
+            self.publish(run)
+        self.assertEqual(self.api.docs[folder_id], backup)
+
+    def test_single_target_does_not_report_the_main_document_as_its_own_backup(self):
+        self.api.rows['rec1']['fields']['备份文档'] = {'link': 'https://old.example/backup'}
+        result = self.publish(self.bound())
+        self.assertEqual(self.api.rows['rec1']['fields']['笔记文档']['link'], result['url'])
+        self.assertIsNone(self.api.rows['rec1']['fields']['备份文档'])
+        self.use_wiki()
+        self.api.add('rec2', 备份文档={'link': 'https://old.example/backup'})
+        result = self.publish(self.bound('rec2'), 'rec2')
+        self.assertEqual(self.api.rows['rec2']['fields']['笔记文档']['link'], result['url'])
+        self.assertIsNone(self.api.rows['rec2']['fields']['备份文档'])
+
+    def test_explicit_legacy_link_mappings_keep_existing_table_compatible(self):
+        self.use_both()
+        self.config.data['fields'] = {'folder_document': '云盘笔记', 'wiki_document': '知识库笔记'}
+        result = self.publish(self.bound())
+        fields = self.api.rows['rec1']['fields']
+        self.assertEqual(fields['云盘笔记']['link'], result['targets']['folder']['url'])
+        self.assertEqual(fields['知识库笔记']['link'], result['url'])
+        self.assertNotIn('备份文档', fields)
+
+    def test_schema_adds_backup_column_and_preserves_unused_legacy_columns(self):
+        from unittest.mock import Mock
+        self.api.fields = Mock(return_value=[{'field_name': '云盘笔记', 'type': 15},
+                                            {'field_name': '知识库笔记', 'type': 15}])
+        self.api.create_field = Mock()
+        result = self.tasks.schema(apply=True)
+        created = {f['field_name'] for f in result['missing']}
+        self.assertIn('笔记文档', created)
+        self.assertIn('备份文档', created)
+        self.assertNotIn('wiki_document', self.config.field_definitions())
+        self.assertEqual(self.api.create_field.call_count, len(created))
+        self.config.data['fields'] = {'folder_document': '云盘笔记', 'wiki_document': '知识库笔记'}
+        created = {f['field_name'] for f in self.tasks.schema()['missing']}
+        self.assertNotIn('备份文档', created)
+        self.assertNotIn('云盘笔记', created)
+        self.assertNotIn('知识库笔记', created)
 
     def test_wiki_publication_returns_node_link_and_reuses_result(self):
         self.use_wiki()

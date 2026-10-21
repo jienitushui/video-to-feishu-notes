@@ -26,7 +26,7 @@ flowchart LR
 - 支持 B站单条视频或单个分 P，以及抖音视频。
 - 字幕优先，无字幕时使用本地语音识别。
 - 提取重点画面，生成章节笔记、知识地图、概念卡片和自测题。
-- 将笔记与图片写入飞书文档，归档至云盘、知识库或两处，回填摘要与对应链接；双归档只生成一次笔记、发布两份独立在线文档。
+- 将笔记与图片写入飞书文档；默认在知识库保存主文档、在云盘文件夹保存生成时的备份副本，也支持仅云盘或仅知识库。
 - 支持去重、重新生成、有限重试和中断恢复。
 - 由用户主动启动，单执行者串行处理。
 
@@ -45,7 +45,7 @@ python -m venv .venv
 ```bash
 python -m pip install -r requirements.txt
 # 复制 config.example.json 为 config.json，填写表格与归档目标
-# publish_target: folder（仅云盘）/ wiki（仅知识库）/ both（两处，示例默认）
+# publish_target: folder（仅云盘）/ wiki（仅知识库）/ both（知识库主文档 + 云盘生成备份，示例默认）
 python scripts/vfn.py doctor
 python scripts/vfn.py schema
 python scripts/vfn.py schema --apply
@@ -59,7 +59,11 @@ python -m pip install -r cache/upstream/requirements.txt
 
 Agent 阅读 [SKILL.md](SKILL.md) 并调用辅助脚本，笔记由当前 Agent 生成，脚本无需额外的模型 API。
 
-双归档模式需同时填写 folder_token、wiki_space_id 和 wiki_parent_node_token，表格新增“云盘笔记”“知识库笔记”两列（已有表执行 schema --apply）。两处都验证成功后才标记完成；一处失败保留另一处成果，重试仅继续未完成部分。两份文档后续的人工修改不会自动互相同步。
+默认 both 模式需同时填写 folder_token、wiki_space_id 和 wiki_parent_node_token。视频只整理一次，生成两份独立在线文档：知识库供日常阅读和编辑，云盘保留最初生成的副本，标题标注“生成备份”。多维表格的“笔记文档”指向知识库，“备份文档”指向云盘。两份都验证成功后才标记完成；一处失败保留另一处进度，重试从检查点继续。
+
+完成后手动修改知识库主文档不会改动云盘备份。重新生成会创建新主文档和新备份，保留旧文档，并在全部成功后更新表格链接。这是生成时的内容备份，不能恢复尚未备份的后续手动修改；当前没有“备份编辑后的主文档”命令。
+
+已有表格将“云盘笔记”重命名为“备份文档”即可保留原链接，“知识库笔记”可隐藏；运行 schema --apply 补齐缺失字段。该命令只补字段，不迁移旧记录链接。原字段名需保留时，可用 fields 映射，见 [安装配置](references/setup.md)。
 
 ## 验证
 

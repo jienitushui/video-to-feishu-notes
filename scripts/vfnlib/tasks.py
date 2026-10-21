@@ -5,7 +5,7 @@ import json
 import time
 import uuid
 
-from .config import FIELDS, STATUSES
+from .config import STATUSES
 
 
 def digest(value):
@@ -159,9 +159,12 @@ class Tasks:
     def result_links(self, published, title):
         targets = self.result_targets(published)
         values = {'document': {'link': published['url'], 'text': title}}
-        for target in ('folder', 'wiki'):
-            result = targets.get(target)
-            values[target + '_document'] = {'link': result['url'], 'text': title} if result else None
+        backup = targets.get('folder') if published['destination']['type'] == 'both' else None
+        values['folder_document'] = {'link': backup['url'], 'text': title + '（生成备份）'} if backup else None
+        # Maintain explicitly mapped legacy columns without adding them to new tables.
+        if 'wiki_document' in self.config.get('fields', {}):
+            wiki = targets.get('wiki')
+            values['wiki_document'] = {'link': wiki['url'], 'text': title} if wiki else None
         return values
 
     def bind(self, record_id, run_id, manifest):
@@ -215,7 +218,7 @@ class Tasks:
     def schema(self, apply=False):
         actual = {f['field_name']: f for f in self.api.fields()}
         missing, mismatched = [], []
-        for key, (_, field_type) in FIELDS.items():
+        for key, (_, field_type) in self.config.field_definitions().items():
             name = self.config.field(key)
             if name in actual:
                 if actual[name]['type'] != field_type:

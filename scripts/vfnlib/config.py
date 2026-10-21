@@ -13,7 +13,8 @@ FIELDS = {
     'title': ('视频标题', 1), 'platform': ('视频平台', 1),
     'category': ('学习分类', 1), 'requirements': ('笔记要求', 1),
     'document': ('笔记文档', 15), 'summary': ('内容摘要', 1),
-    'folder_document': ('云盘笔记', 15), 'wiki_document': ('知识库笔记', 15),
+    'folder_document': ('备份文档', 15),
+    'wiki_document': ('知识库笔记', 15),  # Legacy column: active only with an explicit mapping.
     'regenerate': ('重新生成', 7), 'completed_at': ('完成时间', 5),
     'error': ('错误信息', 1), 'result': ('结果来源', 1),
     'source_key': ('视频唯一标识', 1), 'fingerprint': ('输入指纹', 1),
@@ -33,7 +34,7 @@ class Config:
         unknown = set(data.get('fields', {})) - set(FIELDS)
         if unknown:
             raise ValueError('Unknown field mappings: ' + ', '.join(sorted(unknown)))
-        names = [self.field(k) for k in FIELDS]
+        names = [self.field(k) for k in self.field_definitions()]
         if len(names) != len(set(names)):
             raise ValueError('Field mappings must use distinct field names')
         if self.get('base_url', 'https://open.feishu.cn') not in (
@@ -58,6 +59,10 @@ class Config:
 
     def field(self, key):
         return self.data.get('fields', {}).get(key, FIELDS[key][0])
+
+    def field_definitions(self):
+        mapped = self.data.get('fields', {})
+        return {k: v for k, v in FIELDS.items() if k != 'wiki_document' or k in mapped}
 
     def destination(self):
         mode = self.get('publish_target', 'folder')
