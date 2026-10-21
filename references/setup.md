@@ -3,7 +3,7 @@
 ## 环境
 
 - Python 3.10+、Git，以及能执行本地命令的通用 Agent。
-- 飞书自建应用及其可访问的多维表格、云盘文件夹。
+- 飞书自建应用及其可访问的多维表格、目标知识库目录或云盘文件夹。
 - 飞书 CLI 依赖 requests；视频依赖从固定版本的上游单独安装。
 
 仓库根目录就是 Skill 目录。可克隆到 Agent 的 skills 目录，例如：
@@ -24,7 +24,10 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 - app_token：多维表格应用标识，来自 /base/<app_token> 链接，不是 API access token。知识库页面需先解析实际表格标识。
 - table_id：任务数据表 ID。
-- folder_token：目标云盘文件夹标识；首版要求明确配置。
+- publish_target：wiki（知识库，示例默认）或 folder（云盘文件夹）。旧配置未填写时按 folder 处理。
+- wiki_space_id、wiki_parent_node_token：wiki 模式必填，分别为知识空间 ID 和归档父页面的节点 token。此模式无需 folder_token。
+- wiki_url_prefix：wiki 模式回填链接前缀，建议使用租户的 https://<租户域名>/wiki/。
+- folder_token：仅 folder 模式必填，为目标云盘文件夹标识。
 - document_url_prefix：建议使用租户的 https://<租户域名>/docx/。
 - upstream_path：视频工具目录，相对配置文件所在目录解析。
 - fields：可选字段名映射，见 table-schema.md。
@@ -38,7 +41,32 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 不要将真实密钥提交到 Git，或写入命令参数。config.json 已被忽略，仍应仅存放资源标识与非敏感设置。CLI 不自动读取 .env。
 
-在飞书开放平台发布应用并配置所需权限。所需能力包括：读取及更新多维表格记录、读取及新增字段（仅初始化时）、创建/读取/编辑新版云文档、上传文档素材。具体 scope 名称以实际接口要求为准。目标表格与文件夹还需要实际协作访问权，开通 API 权限不等于可访问所有文件。
+在飞书开放平台发布应用并配置所需权限。所需能力包括：读取及更新多维表格记录、读取及新增字段（仅初始化时）、创建/读取/编辑新版云文档、上传文档素材；wiki 模式另需读取知识库节点和创建子节点，folder 模式的远程检查需要列举文件夹内容。具体 scope 名称以实际接口要求为准。目标表格、知识库目录或文件夹还需要调用身份的实际协作访问权，开通 API 权限不等于可访问所有文件。
+
+## 选择知识库目录
+
+在知识库创建或选择一个“视频学习笔记”父页面，后续每篇笔记作为它的子页面。父页面链接一般形如 https://<租户域名>/wiki/<node_token>；取路径中的 token，不能把它当作正文文档 ID 或知识空间 ID。
+
+先复制 config.example.json 为 config.json，设置凭据后可运行只读解析（此命令不要求其他资源 ID 已填完）：
+
+    python scripts/vfn.py wiki-node <父页面node_token>
+
+从返回的 node 读取 space_id 和 node_token，填入 wiki_space_id 与 wiki_parent_node_token。space_id 建议以 JSON 字符串保存，避免长整数精度损失。也可用 wiki-node <文档ID> --obj-type docx 解析已归档文档的节点。
+
+示例（仅展示归档部分，需与表格、视频等配置合并）：
+
+```json
+{
+  "publish_target": "wiki",
+  "wiki_space_id": "1234567890123456789",
+  "wiki_parent_node_token": "父页面的节点token",
+  "wiki_url_prefix": "https://你的租户.feishu.cn/wiki/"
+}
+```
+
+工具直接调用知识库创建 origin/docx 子节点，取得 obj_token 后使用文档接口写入正文和图片，最终回填 /wiki/<node_token> 链接。不需要先创建云盘文档再移动。创建时草稿即出现在知识库，表格显示完成后才代表内容已校验；新版本保留旧页面。
+
+若使用云盘，设置 publish_target 为 folder 并填写 folder_token 即可。更改目标后，已完成任务默认仍跳过；需要在新目标重新生成的记录须明确请求重新生成。新任务只复用同一目标目录中的笔记。旧版本缺少归档元数据的结果不参与自动复用；旧云盘草稿可继续以 folder 模式恢复。
 
 ## 初始化表格
 
@@ -49,7 +77,9 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 
 schema 默认只返回缺失字段；--apply 创建缺失字段，不删除已有字段。已有同名字段类型不兼容时停止，可配置 fields 映射。表格视图、隐藏列和展示顺序由用户按偏好调整。
 
-API 回读只能确认当前调用身份可访问。首次发布后请用户实际打开文档，确认文件夹的成员权限满足阅读需求。工具不会自动公开分享。
+doctor --remote 只读检查表格字段及目标目录：wiki 模式校验父节点所属知识空间，folder 模式列举文件夹。读取成功不代表有创建权限，报告中 write_access_checked 为 false；首次实际发布再验证写入。
+
+API 回读只能确认当前调用身份可访问。首次发布后请用户实际打开文档，确认知识库或文件夹的成员权限满足阅读需求。工具不会自动公开分享。
 
 ## 视频处理工具
 

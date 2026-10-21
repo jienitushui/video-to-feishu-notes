@@ -30,6 +30,9 @@ def parser():
     tasks.add_argument('--retry', action='store_true')
     show = sub.add_parser('show', help='Read one task and its recovery checkpoint')
     show.add_argument('record_id')
+    wiki = sub.add_parser('wiki-node', help='Resolve a wiki page token to its space, node and document IDs')
+    wiki.add_argument('token')
+    wiki.add_argument('--obj-type', choices=('wiki', 'docx'), default='wiki')
     enqueue = sub.add_parser('enqueue')
     enqueue.add_argument('url')
     enqueue.add_argument('--enabled', action='store_true')
@@ -92,21 +95,26 @@ def execute(args):
     api = Feishu(config)
     tasks = Tasks(api, config)
     if cmd == 'doctor':
+        destination_keys = ('wiki_space_id', 'wiki_parent_node_token') if config.get('publish_target') == 'wiki' else ('folder_token',)
         configured = all(config.get(k) and not str(config.get(k)).startswith('YOUR_')
-                         for k in ('app_token', 'table_id', 'folder_token'))
+                         for k in ('app_token', 'table_id', *destination_keys))
         auth = bool((os.getenv('FEISHU_APP_ID') and os.getenv('FEISHU_APP_SECRET')) or
                     os.getenv('FEISHU_USER_ACCESS_TOKEN') or os.getenv('FEISHU_TENANT_ACCESS_TOKEN'))
         report = {'python': sys.version.split()[0], 'python_executable': sys.executable,
                   'config_ready': configured, 'auth_configured': auth,
+                  'publish_target': config.get('publish_target', 'folder'),
                   'upstream_installed': (config.local_path('upstream_path', 'cache/upstream') / 'scripts/bili_fetch.py').is_file(),
                   'optional_modules': {m: importlib.util.find_spec(m) is not None for m in ('av', 'faster_whisper', 'gmssl', 'numpy', 'PIL')},
                   'remote_checked': False}
         if args.remote:
             report['schema'] = tasks.schema()
+            report['destination'] = api.check_destination()
             report['remote_checked'] = True
         return report
     if cmd == 'schema':
         return tasks.schema(args.apply)
+    if cmd == 'wiki-node':
+        return {'node': api.wiki_node(args.token, args.obj_type)}
     if cmd == 'tasks':
         return {'tasks': tasks.select(args.limit, args.category, args.retry)}
     if cmd == 'show':

@@ -27,6 +27,8 @@ class Config:
     def __init__(self, data, path=None):
         self.data = data
         self.path = Path(path).resolve() if path else ROOT / 'config.json'
+        if self.get('publish_target', 'folder') not in ('folder', 'wiki'):
+            raise ValueError('publish_target must be folder or wiki')
         unknown = set(data.get('fields', {})) - set(FIELDS)
         if unknown:
             raise ValueError('Unknown field mappings: ' + ', '.join(sorted(unknown)))
@@ -55,6 +57,12 @@ class Config:
 
     def field(self, key):
         return self.data.get('fields', {}).get(key, FIELDS[key][0])
+
+    def destination(self):
+        if self.get('publish_target', 'folder') == 'wiki':
+            return {'type': 'wiki', 'space_id': str(self.require('wiki_space_id')),
+                    'parent_node_token': self.require('wiki_parent_node_token')}
+        return {'type': 'folder', 'folder_token': self.require('folder_token')}
 
     def local_path(self, key, default):
         path = Path(self.get(key, default)).expanduser()

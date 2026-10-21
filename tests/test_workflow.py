@@ -20,6 +20,7 @@ class MemoryFeishu:
     def __init__(self):
         self.rows = {}
         self.docs = {}
+        self.wiki_nodes = {}
         self.tokens = {}
         self.fail_append_at = None
         self.fail_complete = False
@@ -58,6 +59,23 @@ class MemoryFeishu:
     def document(self, document_id):
         document = self.docs[document_id]
         return {'document_id': document_id, 'title': document['title']}
+
+    def create_wiki_node(self, title):
+        ambiguous, self.ambiguous_create = self.ambiguous_create, False
+        document = self.create_document(title)
+        token = 'wiki' + str(len(self.wiki_nodes) + 1)
+        node = {'node_token': token, 'obj_token': document['document_id'], 'title': title,
+                'obj_type': 'docx', 'node_type': 'origin', 'space_id': '123',
+                'parent_node_token': 'parent'}
+        self.wiki_nodes[token] = node
+        if ambiguous:
+            raise AmbiguousWrite('connection lost after wiki creation')
+        return copy.deepcopy(node)
+
+    def wiki_node(self, token, obj_type='wiki'):
+        if obj_type == 'docx':
+            return copy.deepcopy(next(n for n in self.wiki_nodes.values() if n['obj_token'] == token))
+        return copy.deepcopy(self.wiki_nodes[token])
 
     def children(self, document_id):
         return copy.deepcopy(self.docs[document_id]['blocks'])
@@ -108,6 +126,161 @@ class WorkflowTests(unittest.TestCase):
 
     def publish(self, run, record='rec1'):
         return self.publisher.publish(record, run, self.note, self.base)
+
+    def use_wiki(self):
+        self.config.data.update(publish_target='wiki', wiki_space_id='123',
+                                wiki_parent_node_token='parent', wiki_url_prefix='https://example.feishu.cn/wiki/')
+        self.config.data.pop('folder_token', None)
+
+    def test_wiki_publication_returns_node_link_and_reuses_result(self):
+        self.use_wiki()
+        result = self.publish(self.bound())
+        self.assertEqual(result['url'], 'https://example.feishu.cn/wiki/wiki1')
+        self.assertEqual(result['document_id'], 'doc1')
+        self.assertEqual(result['wiki_node_token'], 'wiki1')
+        self.assertEqual(self.api.rows['rec1']['fields']['笔记文档']['link'], result['url'])
+        self.api.add('rec2')
+        self.bound('rec2')
+        state = self.tasks.state(self.api.record('rec2'))
+        self.assertEqual(state['published']['reused_from'], 'rec1')
+        self.assertEqual(len(self.api.wiki_nodes), 1)
+
+    def test_wiki_resumes_append_and_failed_completion_without_new_node(self):
+        self.use_wiki()
+        run = self.bound()
+        self.api.fail_append_at = 3
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        run = self.tasks.claim('rec1', resume=True)['run_id']
+        self.api.fail_complete = True
+        with self.assertRaises(RuntimeError):
+            self.publish(run)
+        result = self.publish(run)
+        self.assertEqual(result['blocks'], 7)
+        self.assertEqual(len(self.api.wiki_nodes), 1)
+
+    def test_wiki_unknown_creation_requires_verified_attachment(self):
+        self.use_wiki()
+        run = self.bound()
+        self.api.ambiguous_create = True
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        with self.assertRaisesRegex(TaskError, 'creation outcome is unknown'):
+            self.publish(run)
+        self.api.wiki_nodes['wiki1']['parent_node_token'] = 'wrong-parent'
+        with self.assertRaisesRegex(TaskError, 'Wiki node does not match'):
+            self.publisher.attach('rec1', run, 'doc1')
+        self.api.wiki_nodes['wiki1']['parent_node_token'] = 'parent'
+        self.publisher.attach('rec1', run, 'doc1')
+        self.publish(run)
+        self.assertEqual(len(self.api.wiki_nodes), 1)
+
+    def test_wiki_checkpoint_failure_can_attach_existing_node(self):
+        self.use_wiki()
+        run = self.bound()
+        self.api.lose_checkpoint = True
+        with self.assertRaisesRegex(TaskError, 'doc1'):
+            self.publish(run)
+        self.publisher.attach('rec1', run, 'doc1')
+        self.publish(run)
+        self.assertEqual(len(self.api.wiki_nodes), 1)
+
+    def test_malformed_wiki_creation_response_keeps_guard(self):
+        from unittest.mock import patch
+        self.use_wiki()
+        run = self.bound()
+        original = self.api.create_wiki_node
+
+        def malformed(title):
+            node = original(title)
+            node.pop('obj_token')
+            return node
+
+        with patch.object(self.api, 'create_wiki_node', side_effect=malformed):
+            with self.assertRaisesRegex(TaskError, 'Wiki node does not match'):
+                self.publish(run)
+        with self.assertRaisesRegex(TaskError, 'creation outcome is unknown'):
+            self.publish(run)
+        self.publisher.attach('rec1', run, 'doc1')
+        self.publish(run)
+        self.assertEqual(len(self.api.wiki_nodes), 1)
+
+    def test_wiki_moved_during_publication_cannot_be_marked_complete(self):
+        from unittest.mock import patch
+        self.use_wiki()
+        run = self.bound()
+        original = self.api.document
+
+        def moved(document_id):
+            self.api.wiki_nodes['wiki1']['parent_node_token'] = 'moved'
+            return original(document_id)
+
+        with patch.object(self.api, 'document', side_effect=moved):
+            with self.assertRaisesRegex(TaskError, 'Wiki node does not match'):
+                self.publish(run)
+        row = self.api.record('rec1')
+        self.assertEqual(self.tasks.get(row, 'status'), '处理中')
+        self.assertIsNone(self.tasks.get(row, 'document'))
+
+    def test_wiki_regeneration_keeps_old_link_until_new_version_completes(self):
+        self.use_wiki()
+        old = self.publish(self.bound())['url']
+        run = self.bound(regenerate=True)
+        self.api.fail_append_at = 2
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        self.assertEqual(self.api.rows['rec1']['fields']['笔记文档']['link'], old)
+        result = self.publish(run)
+        self.assertNotEqual(old, result['url'])
+        self.assertEqual(len(self.api.wiki_nodes), 2)
+
+    def test_changed_destination_stops_resume(self):
+        self.use_wiki()
+        run = self.bound()
+        self.api.fail_append_at = 2
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        self.config.data['wiki_parent_node_token'] = 'other'
+        with self.assertRaisesRegex(TaskError, 'destination changed'):
+            self.publish(run)
+        self.assertEqual(len(self.api.wiki_nodes), 1)
+
+    def test_moved_wiki_node_blocks_resume_and_reuse(self):
+        self.use_wiki()
+        self.publish(self.bound())
+        self.api.wiki_nodes['wiki1']['parent_node_token'] = 'moved'
+        self.api.add('rec2')
+        run = self.bound('rec2')
+        self.assertEqual(self.tasks.get(self.api.record('rec2'), 'status'), '处理中')
+        self.api.fail_append_at = 2
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run, 'rec2')
+        self.api.wiki_nodes['wiki2']['obj_token'] = 'another-doc'
+        with self.assertRaisesRegex(TaskError, 'Wiki node does not match'):
+            self.publish(run, 'rec2')
+
+    def test_folder_result_not_reused_for_wiki_destination(self):
+        self.publish(self.bound())
+        self.use_wiki()
+        self.api.add('rec2')
+        run = self.bound('rec2')
+        self.assertEqual(self.tasks.get(self.api.record('rec2'), 'status'), '处理中')
+        result = self.publish(run, 'rec2')
+        self.assertEqual(result['document_id'], 'doc2')
+        self.assertEqual(len(self.api.wiki_nodes), 1)
+
+    def test_legacy_folder_draft_not_adopted_by_wiki(self):
+        run = self.bound()
+        self.api.fail_append_at = 2
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        state = self.tasks.state(self.api.record('rec1'))
+        del state['publish']['destination']
+        self.tasks.save_state('rec1', state)
+        self.use_wiki()
+        with self.assertRaisesRegex(TaskError, 'Legacy folder draft'):
+            self.publish(run)
+        self.assertFalse(self.api.wiki_nodes)
 
     def test_publish_and_skip_completed(self):
         result = self.publish(self.bound())

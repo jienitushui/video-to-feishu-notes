@@ -166,8 +166,16 @@ class Tasks:
                 published = candidate.get('published')
                 if not published or not published.get('document_id'):
                     continue
+                # Content can be reused only within the requested archive location.
+                # Legacy results without a destination need a new publication.
+                if published.get('destination') != self.config.destination():
+                    continue
                 try:
                     self.api.document(published['document_id'])
+                    if published['destination']['type'] == 'wiki':
+                        from .publish import Publisher
+                        node = self.api.wiki_node(published['wiki_node_token'])
+                        Publisher.check_wiki_node(node, published['destination'], published['document_id'])
                 except Exception:
                     continue
                 fresh = self.own(record_id, run_id)

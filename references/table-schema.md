@@ -26,7 +26,7 @@ CLI 在现有表内创建下列字段，不创建新的 Base，不自动修改�
 
     "fields": {"url": "原视频", "document": "课堂笔记", "state": "系统检查点"}
 
-检查点保存 input、generation、run_id、source、fingerprint、publish、published。input 包含原始链接、笔记要求、模板版本和输出语言。publish 保存内容哈希、创建尝试、标题和已写数量。published 保存已成功文档 ID、URL、哈希；复用时记录来源。不要放完整字幕、图片字节或凭据。
+检查点保存 input、generation、run_id、source、fingerprint、publish、published。input 包含原始链接、笔记要求、模板版本和输出语言。publish 保存内容哈希、创建尝试、标题、已写数量、destination（归档目标）；wiki 模式另存 wiki_node（node_token 与 obj_token）。published 保存已成功文档 ID、URL、哈希、destination 及可选 wiki_node_token；复用时记录来源。工作文档ID始终存正文 document_id，知识库链接使用节点 token。无需额外建列存知识库检查点。不要放完整字幕、图片字节或凭据。
 
 默认筛选 enabled=true、有链接、待处理；已完成且重新生成=true 也可入队。明确重试时才纳入失败记录。空状态视为待处理；分类为精确文本匹配。
 

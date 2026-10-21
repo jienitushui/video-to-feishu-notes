@@ -26,6 +26,16 @@ class Publisher:
     def __init__(self, tasks):
         self.tasks, self.api = tasks, tasks.api
 
+    @staticmethod
+    def check_wiki_node(node, destination, document_id=None):
+        if (not node.get('node_token') or not node.get('obj_token') or
+                node.get('obj_type') != 'docx' or node.get('node_type') != 'origin' or
+                str(node.get('space_id')) != destination['space_id'] or
+                node.get('parent_node_token') != destination['parent_node_token'] or
+                (document_id and node.get('obj_token') != document_id)):
+            raise TaskError('Wiki node does not match the document and configured destination; inspect before continuing')
+        return {k: node[k] for k in ('node_token', 'obj_token')}
+
     def publish(self, record_id, run_id, note, base):
         task = self.tasks.own(record_id, run_id)
         state = self.tasks.state(task)
@@ -38,6 +48,12 @@ class Publisher:
         # Absolute paths differ across devices; content and image hashes define identity.
         plan_hash = digest([{k: v for k, v in item.items() if k != 'path'} for item in plan])
         pub = state.setdefault('publish', {})
+        destination = self.tasks.config.destination()
+        if pub.get('destination') and pub['destination'] != destination:
+            raise TaskError('Publication destination changed; restore the original config or regenerate a new version')
+        if pub and not pub.get('destination') and destination['type'] == 'wiki':
+            raise TaskError('Legacy folder draft cannot become a wiki draft; restore folder config or regenerate')
+        pub['destination'] = destination
         if pub.get('hash') and pub['hash'] != plan_hash:
             raise TaskError('Draft content or images changed; resume the original note or regenerate a new version')
         pub.update(hash=plan_hash, expected_blocks=len(plan))
@@ -48,14 +64,18 @@ class Publisher:
             pub.update(creating=True, title=note['title'] + ' [vfn:' + record_id + ':' + state['generation'][:8] + ']')
             self.tasks.save_state(record_id, state, stage='创建文档')
             try:
-                document = self.api.create_document(pub['title'])
+                if destination['type'] == 'wiki':
+                    node = self.api.create_wiki_node(pub['title'])
+                    pub['wiki_node'] = self.check_wiki_node(node, destination)
+                    document_id = node['obj_token']
+                else:
+                    document_id = self.api.create_document(pub['title'])['document_id']
             except AmbiguousWrite:
                 raise
             except FeishuError:
                 pub['creating'] = False
                 self.tasks.save_state(record_id, state)
                 raise
-            document_id = document['document_id']
             pub['creating'] = False
             try:
                 self.tasks.save_state(record_id, state, document_id=document_id, stage='写入文档')
@@ -63,6 +83,11 @@ class Publisher:
                 raise TaskError('Document created but checkpoint failed. Preserve and attach document ID: ' + document_id) from exc
         else:
             self.api.document(document_id)
+        if destination['type'] == 'wiki':
+            node_token = pub.get('wiki_node', {}).get('node_token')
+            if not node_token:
+                raise TaskError('Missing wiki node checkpoint; inspect before continuing')
+            self.check_wiki_node(self.api.wiki_node(node_token), destination, document_id)
         # Feishu may return one empty starter paragraph for a new document.
         existing = self.api.children(document_id)
         start = pub.get('starter_blocks')
@@ -100,16 +125,25 @@ class Publisher:
         for block, item in zip(final, plan):
             if 'path' in item and not block.get('image', {}).get('token'):
                 raise TaskError('Image token missing after publication')
+        self.api.document(document_id)  # Confirms API caller access, not every human reader.
+        published = {'document_id': document_id, 'hash': plan_hash, 'destination': destination}
+        if destination['type'] == 'wiki':
+            node_token = pub['wiki_node']['node_token']
+            self.check_wiki_node(self.api.wiki_node(node_token), destination, document_id)
+            prefix = self.tasks.config.get('wiki_url_prefix', 'https://feishu.cn/wiki/')
+            url = prefix.rstrip('/') + '/' + node_token
+            published['wiki_node_token'] = node_token
+        else:
+            prefix = self.tasks.config.get('document_url_prefix', 'https://feishu.cn/docx/')
+            url = prefix.rstrip('/') + '/' + document_id
+        published['url'] = url
         fresh = self.tasks.own(record_id, run_id)
         self.tasks.assert_input(fresh, state)
-        self.api.document(document_id)  # Confirms API caller access, not every human reader.
-        prefix = self.tasks.config.get('document_url_prefix', 'https://feishu.cn/docx/')
-        url = prefix.rstrip('/') + '/' + document_id
-        state['published'] = {'document_id': document_id, 'url': url, 'hash': plan_hash}
+        state['published'] = published
         self.tasks.save_state(record_id, state, status='已完成', stage='完成',
                               document={'link': url, 'text': note['title']}, summary=note['summary'],
                               completed_at=int(time.time() * 1000), result='新生成', regenerate=False, error='')
-        return {'record_id': record_id, 'status': '已完成', 'document_id': document_id, 'url': url, 'blocks': len(final)}
+        return dict(published, record_id=record_id, status='已完成', blocks=len(final))
 
     def attach(self, record_id, run_id, document_id):
         record = self.tasks.own(record_id, run_id)
@@ -120,6 +154,14 @@ class Publisher:
         pub = state.get('publish', {})
         if not pub.get('creating') or not pub.get('title'):
             raise TaskError('No unresolved document creation')
+        destination = self.tasks.config.destination()
+        if pub.get('destination') and pub['destination'] != destination:
+            raise TaskError('Publication destination changed; restore the original config')
+        if destination['type'] == 'wiki':
+            if not pub.get('destination'):
+                raise TaskError('Legacy folder draft cannot become a wiki draft')
+            node = self.api.wiki_node(document_id, obj_type='docx')
+            pub['wiki_node'] = self.check_wiki_node(node, destination, document_id)
         if self.api.document(document_id).get('title') != pub['title']:
             raise TaskError('Document title does not match the saved creation attempt')
         children = self.api.children(document_id)

@@ -127,6 +127,32 @@ class Feishu:
         return self.request('POST', '/docx/v1/documents',
                             body={'title': title, 'folder_token': self.config.require('folder_token')})['document']
 
+    def wiki_node(self, token, obj_type='wiki'):
+        return self.request('GET', '/wiki/v2/spaces/get_node',
+                            params={'token': token, 'obj_type': obj_type})['node']
+
+    def create_wiki_node(self, title):
+        destination = self.config.destination()
+        if destination['type'] != 'wiki':
+            raise ValueError('Configure publish_target=wiki before creating a wiki node')
+        return self.request('POST', '/wiki/v2/spaces/{}/nodes'.format(
+            quote(destination['space_id'], safe='')), body={
+                'obj_type': 'docx', 'node_type': 'origin', 'title': title,
+                'parent_node_token': destination['parent_node_token']})['node']
+
+    def check_destination(self):
+        destination = self.config.destination()
+        if destination['type'] == 'wiki':
+            node = self.wiki_node(destination['parent_node_token'])
+            if (str(node.get('space_id')) != destination['space_id'] or
+                    node.get('node_token') != destination['parent_node_token']):
+                raise FeishuError('Wiki parent node does not belong to the configured space')
+            return dict(destination, readable=True, write_access_checked=False)
+        # Listing confirms access, but does not prove the caller may create files.
+        self.request('GET', '/drive/v1/files', params={
+            'folder_token': destination['folder_token'], 'page_size': 1})
+        return dict(destination, readable=True, write_access_checked=False)
+
     def children(self, document_id):
         return list(self.paginate('/docx/v1/documents/{0}/blocks/{0}/children'.format(quote(document_id, safe=''))))
 
