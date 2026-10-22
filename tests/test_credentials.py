@@ -51,7 +51,8 @@ class CredentialTests(unittest.TestCase):
         selected = self.root / 'selected.env'
         selected.write_text('FEISHU_USER_ACCESS_TOKEN=selected-token\n', encoding='utf-8')
         os.environ['VFN_ENV_FILE'] = str(self.root / 'missing.env')
-        self.assertEqual(load_credentials(selected), selected)
+        # macOS symlinks and Windows short names can resolve to different spellings.
+        self.assertTrue(load_credentials(selected).samefile(selected))
         self.assertEqual(os.environ['FEISHU_USER_ACCESS_TOKEN'], 'selected-token')
         self.assertNotIn('FEISHU_APP_SECRET', os.environ)
 
@@ -59,7 +60,7 @@ class CredentialTests(unittest.TestCase):
         selected = self.root / 'other.env'
         selected.write_text('FEISHU_TENANT_ACCESS_TOKEN=tenant-test\n', encoding='utf-8')
         os.environ['VFN_ENV_FILE'] = str(selected)
-        self.assertEqual(load_credentials(), selected)
+        self.assertTrue(load_credentials().samefile(selected))
         self.assertEqual(os.environ['FEISHU_TENANT_ACCESS_TOKEN'], 'tenant-test')
 
     def test_explicit_missing_file_and_directory_are_errors(self):
