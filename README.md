@@ -53,7 +53,9 @@ python scripts/vfn.py video install-upstream
 python -m pip install -r cache/upstream/requirements.txt
 ```
 
-飞书凭据通过环境变量提供，不写入仓库。完整配置步骤、所需工具能力和命令参见 [安装配置](references/setup.md)。配置好后，对 Agent 说：
+支持 Windows、macOS、Linux 的 `vfn` 短命令：在仓库根目录用虚拟环境运行 `python -m pip install -e .`，将该环境的入口目录加入 PATH（或激活环境），即可运行 `vfn doctor`。原有 Python 命令仍可使用。
+
+复制 `.env.example` 为 `.env.local` 并填写飞书凭据；两个入口都会自动加载，已有环境变量优先。macOS/Linux 填写前设置 `chmod 600 .env.local`，Windows 用文件访问权限限制读取。凭据不写进 config.json 或提交到 Git。完整配置步骤、所需工具能力和命令参见 [安装配置](references/setup.md)。配置好后，对 Agent 说：
 
 > 使用 video-to-feishu-notes，处理飞书视频收集表中的待整理任务，最多 3 个。
 

@@ -4,7 +4,7 @@ jobs:
   tests:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python: ['3.10', '3.12']
     runs-on: ${{ matrix.os }}
     steps:
@@ -13,6 +13,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip install -e .
       - run: python -m unittest discover -s tests -v
       - run: python scripts/vfn.py validate-note examples/note.json
       - run: python -m compileall -q scripts

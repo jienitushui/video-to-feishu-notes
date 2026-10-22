@@ -4,7 +4,7 @@
 
 - Python 3.10+、Git，以及能执行本地命令的通用 Agent。
 - 飞书自建应用及其可访问的多维表格、目标知识库目录或云盘文件夹。
-- 飞书 CLI 依赖 requests；视频依赖从固定版本的上游单独安装。
+- 飞书 CLI 依赖 requests 和 python-dotenv；视频依赖从固定版本的上游单独安装。
 
 仓库根目录就是 Skill 目录。可克隆到 Agent 的 skills 目录，例如：
 
@@ -17,6 +17,32 @@
 Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python`。以下用 python 代表选定环境的解释器；在 Agent 中建议使用完整路径，上游工具也会使用同一解释器。
 
     python -m pip install -r requirements.txt
+
+## 安装 vfn 短命令
+
+在仓库根目录用虚拟环境执行可编辑安装。入口固定使用安装时的 Python，读取当前 checkout 的代码；移动仓库或虚拟环境后需重新安装。
+
+Windows PowerShell：
+
+```powershell
+.venv/Scripts/python.exe -m pip install -e .
+# 将入口目录加入当前终端的 PATH，无需执行激活脚本
+$vfnScripts = (Resolve-Path .venv/Scripts).Path
+$env:Path = "$vfnScripts;$env:Path"
+vfn --help
+```
+
+macOS / Linux（bash、zsh）：
+
+```bash
+.venv/bin/python -m pip install -e .
+source .venv/bin/activate
+vfn --help
+```
+
+pip 在 Windows 生成 `.venv/Scripts/vfn.exe`，在 macOS/Linux 生成 `.venv/bin/vfn`。新终端需重新激活虚拟环境或设置 PATH；若需要长期直接调用，可将该虚拟环境的入口目录加入用户 PATH。也可始终用入口完整路径，无需管理员权限或修改系统目录。
+
+`vfn` 与 `python scripts/vfn.py` 使用同一实现，参数和退出码一致，不改变运行目录；`--output`、笔记路径等相对路径按调用者当前目录解析。默认配置仍来自项目根目录的 `config.json`，其中 upstream_path 等路径按配置文件目录解析。
 
 ## 配置与授权
 
@@ -32,14 +58,31 @@ Windows 使用 `.venv/Scripts/python.exe`，macOS/Linux 使用 `.venv/bin/python
 - upstream_path：视频工具目录，相对配置文件所在目录解析。
 - fields：可选字段名映射，见 table-schema.md。
 
-凭据使用环境变量，PowerShell 示例：
+凭据可保存到项目根目录的 `.env.local`，先复制 `.env.example`，再填写值：
+
+```dotenv
+FEISHU_APP_ID=cli_你的应用ID
+FEISHU_APP_SECRET="你的应用密钥"
+```
+
+macOS/Linux 在填写真实密钥前运行 `chmod 600 .env.local`，仅允许文件所有者读写。Windows 使用文件安全属性限制访问，不使用 Unix 的 600 权限表示法。`.env.local` 已被 Git 忽略；仓库只包含无真实凭据的 `.env.example`。
+
+也可继续手动设置环境变量，PowerShell 示例：
 
     $env:FEISHU_APP_ID = '<应用 ID>'
     $env:FEISHU_APP_SECRET = '<应用密钥>'
 
 也支持 FEISHU_USER_ACCESS_TOKEN 或 FEISHU_TENANT_ACCESS_TOKEN。优先 user token，其次 tenant token，否则使用应用密钥换取 tenant token。直接配置的短期 token 过期后由用户或宿主更新，CLI 不保存或刷新 user token。
 
-不要将真实密钥提交到 Git，或写入命令参数。config.json 已被忽略，仍应仅存放资源标识与非敏感设置。CLI 不自动读取 .env。
+两个命令入口都在执行前统一加载凭据：
+
+- 文件选择：`--env-file <路径>` 优先，其次环境变量 `VFN_ENV_FILE`，最后是项目根目录的 `.env.local`，不向上搜索，也不读取运行目录的同名文件。一次只读一个文件。
+- 默认文件不存在时继续使用已有环境变量；显式指定的文件不存在时返回错误。
+- 已存在的环境变量优先，包括空值；要改用文件值，先移除对应环境变量。
+- 只读取上述四个 `FEISHU_*` 认证变量，不加载 PATH 或其他设置。文件支持 UTF-8（含 BOM）、注释和引号；不执行 shell 命令，不展开 `${变量}`。
+- `--env-file` 和 `--config` 都放在子命令前，例如 `vfn --env-file /path/to/account.env --config /path/to/config.json doctor`。显式相对路径按运行目录解析，支持 `~` 凭据路径。
+
+不要将真实密钥提交到 Git，或写入命令参数。config.json 已被忽略，仍只存放资源标识与非敏感设置；凭据文件不替代 config.json。CLI 不自动读取 `.env`。B站 SESSDATA 仍由上游本地配置管理。运行 `vfn doctor` 可查看 auth_configured 是否为 true；它只检查凭据是否已配置，不校验凭据有效性，也不输出凭据值。
 
 在飞书开放平台发布应用并配置所需权限。所需能力包括：读取及更新多维表格记录、读取及新增字段（仅初始化时）、创建/读取/编辑新版云文档、上传文档素材；wiki/both 模式另需读取知识库节点和创建子节点，folder/both 模式的远程检查需要列举文件夹内容。具体 scope 名称以实际接口要求为准。目标表格、知识库目录或文件夹还需要调用身份的实际协作访问权，开通 API 权限不等于可访问所有文件。
 

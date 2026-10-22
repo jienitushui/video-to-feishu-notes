@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from .config import Config
+from .credentials import load_credentials
 from .feishu import Feishu
 from .notes import load_note, markdown, validate_note
 from .publish import Publisher
@@ -19,6 +20,7 @@ from .video import prepare, install_upstream
 def parser():
     ap = argparse.ArgumentParser(description='Agent-driven video notes with Feishu task state')
     ap.add_argument('--config', help='Config JSON, or set VFN_CONFIG')
+    ap.add_argument('--env-file', help='Credential file, or set VFN_ENV_FILE; defaults to project .env.local')
     sub = ap.add_subparsers(dest='command', required=True)
     doctor = sub.add_parser('doctor', help='Check local configuration; --remote checks table fields and access')
     doctor.add_argument('--remote', action='store_true')
@@ -158,6 +160,7 @@ def main(argv=None):
         sys.stdout.reconfigure(encoding='utf-8')
     args = parser().parse_args(argv)
     try:
+        load_credentials(args.env_file)
         result = execute(args)
     except Exception as exc:
         print(json.dumps({'ok': False, 'error_type': type(exc).__name__, 'error': str(exc)}, ensure_ascii=False))

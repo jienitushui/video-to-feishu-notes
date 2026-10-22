@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-to-feishu-notes"
+version = "0.1.0"
+description = "Agent-driven video notes with Feishu task state"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.scripts]
+vfn = "vfnlib.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "scripts"}
+packages = ["vfnlib"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
