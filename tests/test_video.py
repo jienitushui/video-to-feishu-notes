@@ -22,6 +22,9 @@ class VideoTests(unittest.TestCase):
         self.config = Config({'upstream_path': str(self.root / 'upstream')})
         self.out = self.root / 'output'
         self.url = 'https://www.bilibili.com/video/BV1Wv411h7kN?p=2'
+        runtime = patch('vfnlib.video.ensure_runtime', return_value={'ready': True, 'python': sys.executable})
+        runtime.start()
+        self.addCleanup(runtime.stop)
 
     def runner(self, command, cwd=None):
         if command[-2:] == ['rev-parse', 'HEAD']:
@@ -67,7 +70,7 @@ class VideoTests(unittest.TestCase):
             self.assertEqual(refreshed['transcription']['status'], 'prepared')
 
     def test_language_settings_apply_to_short_video_and_invalid_settings_stop_early(self):
-        def asr(meta, page, out, script, **kwargs):
+        def asr(config, meta, page, out, script, **kwargs):
             target = out / ('02_' + safe_part('a' * 80) + '.txt')
             target.write_text('[00:00] Hello NVIDIA', encoding='utf-8')
             self.assertEqual(kwargs['language'], 'en')
@@ -83,7 +86,7 @@ class VideoTests(unittest.TestCase):
 
         self.config.data.update(asr_hotwords=['GPU'], asr_language='zh')
         with patch('vfnlib.video.run', side_effect=runner), \
-                patch('vfnlib.video.transcribe_page_chunked', side_effect=asr):
+                patch('vfnlib.video.transcribe_with_runtime', side_effect=asr):
             material = prepare(self.config, self.url, self.out, transcribe=True,
                                asr_language='en', hotwords=['NVIDIA'], screenshots=False)
         self.assertTrue(material['transcript_quality']['passed'])
@@ -101,7 +104,7 @@ class VideoTests(unittest.TestCase):
         with patch('vfnlib.video.run', side_effect=self.runner):
             manifest = prepare(self.config, self.url, self.out)
             next(self.out.glob('*.txt')).unlink()
-            with patch('vfnlib.video.transcribe_page_chunked', return_value={'status': 'prepared'}), \
+            with patch('vfnlib.video.transcribe_with_runtime', return_value={'status': 'prepared'}), \
                     self.assertRaisesRegex(RuntimeError, 'usable transcript'):
                 prepare(self.config, self.url, self.out, transcribe=True)
 

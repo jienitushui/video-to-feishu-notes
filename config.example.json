@@ -12,6 +12,8 @@
   "language": "zh-CN",
   "asr_language": "auto",
   "asr_hotwords": [],
+  "auto_recover_runtime": true,
+  "media_runtime_path": "cache/media-runtime",
   "output_root": "output",
   "upstream_path": "cache/upstream",
   "upstream_revision": "2497a7f564670c840f5e1c4055c8a536237cd5f3",

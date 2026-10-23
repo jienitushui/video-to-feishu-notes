@@ -25,13 +25,16 @@ flowchart LR
 
 - 支持 B站单条视频或单个分 P，以及抖音视频。
 - 字幕优先，无字幕时使用本地语音识别。
+- 批量处理前可只查询视频元数据，显示每条时长、合计和输出磁盘剩余空间；不预测耗时或设置固定拦截阈值。
 - 完整字幕与转写稿通过结构质检后保留原稿；可选校正版独立保存，检查段数、时间点和字符保留率，发布前核验留存文件。
+- 自动生成按十分钟窗口组织的本地原文阅读索引，含来源、时间、段落编号与独立阅读进度；校正版切换后重新记录进度。
 - ASR 默认自动检测语言，支持显式语言与术语提示；参数随检查点固定，短视频和长视频均支持。
 - 提取重点画面，生成章节笔记、知识地图、概念卡片和自测题。
 - 播客、访谈按主题、观点与论据、适用边界和回看索引组织，不强套课堂自测模板。
 - 素材准备默认提取截图候选；没有字幕或关键词时按时间分布抽帧。Agent 视觉复核后将图片插入对应小节，新笔记无图且未说明原因时会被校验和发布拦截。
 - 将笔记与图片写入飞书文档；默认在知识库保存主文档、在云盘文件夹保存生成时的备份副本，也支持仅云盘或仅知识库。
 - 支持去重、重新生成、有限重试和中断恢复。长视频分片 ASR 的 `doctor` 会报告依赖就绪情况；分批续跑时保留临时音频，完成后清理，并校验分片计划与检查点匹配。
+- 媒体环境缺依赖或不兼容时优先复用可用环境，否则自动建立独立运行环境；安装失败保留旧环境和任务检查点。`doctor` 只诊断，`video bootstrap` 可提前准备。
 - 由用户主动启动，单执行者串行处理。
 - 本地工作文件统一按 `output/<record_id>/v<生成版本>/` 保存；任务完成后可用 `cleanup-local` 预览并清理旧版本，默认不触碰当前版本或旧式平铺目录。
 
@@ -55,10 +58,18 @@ python scripts/vfn.py doctor
 python scripts/vfn.py schema
 python scripts/vfn.py schema --apply
 python scripts/vfn.py video install-upstream
-python -m pip install -r cache/upstream/requirements.txt
+python scripts/vfn.py video bootstrap
 ```
 
-素材准备时推荐使用任务版本目录：
+开始前可对本批链接运行轻量预检（不下载媒体、不转写、不写飞书）：
+
+```powershell
+python scripts/vfn.py video preflight "<视频链接1>" "<视频链接2>"
+```
+
+默认检查配置中 output_root 所在磁盘；可用 `--output-root <实际输出目录>` 覆盖，目录不存在时检查其最近的已有父目录，不创建目录。`videos` 返回逐条标题、时长和查询错误，`total_minutes` 为完整合计；存在未知时长时该值为 null，`known_total_minutes` 只代表已知部分。`disk.free_gib` 为可用 GiB，不能据此保证任务一定有足够空间。查询失败会保留其他条目的结果；抖音缺少签名依赖时报告未知，不触发安装。
+
+预检后按原定任务范围准备素材：
 
 ```powershell
 python scripts/vfn.py video prepare "<视频链接>" --record-id <record_id> --version <生成版本> --transcribe --screenshots
@@ -73,6 +84,16 @@ python scripts/vfn.py video finalize-transcript --manifest output/<record_id>/v<
 ```
 
 成功后 `manifest.transcript` 指向独立校正版，原稿保持不变。结构质检不证明听写正确，仍须核对关键内容；原稿和校正版默认只在本地留存。播客写作见 [播客笔记模板](references/podcast-notes.md)。
+
+完整素材还会生成 `manifest.reading_index_markdown` 指向的阅读索引；逐片读完后可以记录进度：
+
+```powershell
+python scripts/vfn.py video reading-index --manifest output/<record_id>/v<生成版本>/manifest.json --mark-read part-0001 part-0002
+```
+
+阅读包保留完整原段落，索引不替代阅读全文；无段落起点窗口不等于静音或漏听。详见 [阅读与转写说明](references/transcripts.md#长视频阅读索引)。索引与全文继续只在本地留存，暂不做完整原文分篇归档到飞书。
+
+运行环境恢复默认开启，固定兼容的 PyAV 和 faster-whisper，复用已有环境或在 cache/media-runtime 创建新环境，沿用原任务目录续跑。初次新建需要网络与已安装的 Python 3.10–3.12，语音模型由首次 ASR 按原流程下载；可禁用自动恢复或指定解释器，见 [安装配置](references/setup.md#视频处理工具)。
 
 任务完成后清理本地旧版本（先预览，确认后再加 `--apply`）：
 

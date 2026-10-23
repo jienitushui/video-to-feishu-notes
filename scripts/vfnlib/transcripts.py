@@ -147,9 +147,11 @@ def retain_transcript(path, root, source, origin):
         active = directory / 'raw.txt'
     if not report['passed']:
         raise ValueError('Transcript quality check failed: ' + ', '.join(report['hard_failures']))
-    return {'transcript': str(active), 'raw_transcript': str(directory / 'raw.txt'),
+    from .reading_index import build_reading_index
+    reading = build_reading_index(root, source, active, corrected if info.get('corrected_text') else segments)
+    return dict(reading, **{'transcript': str(active), 'raw_transcript': str(directory / 'raw.txt'),
             'transcript_provenance': str(info_path), 'transcript_quality': report,
-            'corrected_transcript': str(active) if info.get('corrected_text') else None}
+            'corrected_transcript': str(active) if info.get('corrected_text') else None})
 
 
 def correction_quality(raw, corrected, duration=None):
@@ -204,6 +206,8 @@ def finalize_transcript(manifest_path, corrections_path):
                 corrected_segments_sha256=sha256(root / 'transcripts/corrected.segments.json'))
     atomic_json(info_path, info)
     manifest.update(transcript=str(corrected_file), corrected_transcript=str(corrected_file), transcript_quality=report)
+    from .reading_index import build_reading_index
+    manifest.update(build_reading_index(root, manifest['source'], corrected_file, corrected))
     atomic_json(manifest_path, manifest)
     return dict(manifest, manifest=str(manifest_path))
 

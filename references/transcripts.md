@@ -1,6 +1,6 @@
 # 转写质检、校正和语言
 
-仅在需要本地 ASR、核对转写或修正术语时读取。本页的命令只写本地文件，不发布飞书，也不调用额外模型 API。
+在需要本地 ASR、核对转写、修正术语或逐段阅读长视频时读取。本页的命令只写本地文件，不发布飞书，也不调用额外模型 API。
 
 ## 获取与留存
 
@@ -58,3 +58,25 @@ python scripts/vfn.py video finalize-transcript --manifest output/<record_id>/v<
 成功后保存独立校正版并原子更新 manifest，原稿不改写；同一校正可以重试，新的不同校正使用新版本。发布前重新校验本地原稿与校正版的哈希、来源和时间轴；发现留存文件被手改时停止，恢复原文件或开启新版本。再次 prepare 不会把校正版覆盖回原稿。
 
 原稿和校正版是本地核验素材，默认不作为额外全文文档上传飞书。飞书仍保存生成笔记；是否发布或生成新版本遵循主 Skill 的任务授权。
+
+## 长视频阅读索引
+
+完整素材在 prepare 或 finalize-transcript 成功时自动生成本地阅读包：
+
+- `manifest.reading_index_markdown`：时间窗口表与阅读文件链接。
+- `manifest.reading_index`：机器可读 JSON，含来源、全文哈希、窗口、片段、原段落编号及无段落起点窗口。
+- 同目录 `part-0001.md` 等：来源标题、链接、全文哈希、原段落编号与真实起点，以及该片的完整原文。
+- `manifest.reading_progress`：可变阅读进度。manifest 中的 reading_coverage 是最近命令执行时的快照。
+
+文件位于 `transcripts/reading/<内容与版本指纹>/`。按原段落起点分到十分钟窗口，窗口内超过 12,000 个原文字字符时按完整段落拆片；特别长的单段会整体保留，可超过这个软上限，不截断原文。全部片段按时间顺序覆盖当前全文，每个原段落出现一次。窗口边界是导航范围，不是推测的说话结束时间；无段落起点可能只是前段很长，不能据此断言静音或漏转写。
+
+阅读顺序：读索引、逐片读原文、结合相邻片段分析，实际读完后才记录状态：
+
+```powershell
+python scripts/vfn.py video reading-index --manifest output/<record_id>/v<版本>/manifest.json
+python scripts/vfn.py video reading-index --manifest output/<record_id>/v<版本>/manifest.json --mark-read part-0001 part-0002
+```
+
+第一个命令校验留存原稿与校正版后重建派生索引；第二个只标记提供的有效片段 ID，重复标记幂等。检查 `reading_coverage.unread_parts`，不要把索引、预览或“已读”标记当作阅读全文的替代。已读状态是本地工作记录，不是识别准确或内容完整性的证明。
+
+同稿重建保留进度，切换校正版产生新索引、从未读开始，旧阅读包继续留存。未完成转写、质检失败或留存稿被修改时拒绝生成。旧素材没有 provenance 时先再次 prepare 补留原稿。索引只服务本地阅读，不增加飞书全文归档。

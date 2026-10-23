@@ -10,9 +10,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
-from .transcription import (ChunkedTranscriptionUnavailable, transcribe_page_chunked,
+from .transcription import (ChunkedTranscriptionUnavailable,
                             normalize_language, build_hotwords, atomic_json)
 from .transcripts import retain_transcript, verify_material_transcript
+from .runtime import ensure_runtime, transcribe_with_runtime
 
 UPSTREAM_URL = 'https://github.com/lucky-Luor/bilibili-douyin-notes.git'
 UPSTREAM_REVISION = '2497a7f564670c840f5e1c4055c8a536237cd5f3'
@@ -45,7 +46,7 @@ def install_upstream(config, target=None):
     if actual != revision:
         raise RuntimeError('Upstream revision mismatch')
     return {'path': str(path), 'revision': actual,
-            'next': 'Install requirements from the upstream checkout with the same Python interpreter'}
+            'next': 'Run video bootstrap to check or recover the media runtime'}
 
 
 def classify(source):
@@ -78,6 +79,19 @@ def choose_page(metadata, page):
     return matches[0]
 
 
+def resolve_input(request):
+    platform, url, page = classify(request)
+    if urlsplit(url).hostname == 'b23.tv':
+        response = requests.get(url, timeout=(10, 30), headers={'User-Agent': 'Mozilla/5.0'})
+        response.raise_for_status()
+        resolved_platform, resolved_url, resolved_page = classify(response.url)
+        if resolved_platform != 'bilibili' or urlsplit(resolved_url).hostname == 'b23.tv':
+            raise ValueError('Bilibili short URL did not resolve to a video')
+        page = page if 'p' in parse_qs(urlsplit(url).query) else resolved_page
+        url = resolved_url
+    return platform, url, page
+
+
 def prepare(config, request, output, transcribe=False, screenshots=True, max_chunks_per_run=3,
             asr_language=None, hotwords=None):
     if max_chunks_per_run < 0:
@@ -96,16 +110,7 @@ def prepare(config, request, output, transcribe=False, screenshots=True, max_chu
     actual = run(['git', '-C', str(upstream), 'rev-parse', 'HEAD']).strip()
     if actual != revision:
         raise ValueError('Upstream version differs from configured pin; review before changing upstream_revision')
-    platform, url, page = classify(request)
-    if urlsplit(url).hostname == 'b23.tv':
-        response = requests.get(url, timeout=(10, 30), headers={'User-Agent': 'Mozilla/5.0'})
-        response.raise_for_status()
-        resolved_platform, resolved_url, resolved_page = classify(response.url)
-        if resolved_platform != 'bilibili' or urlsplit(resolved_url).hostname == 'b23.tv':
-            raise ValueError('Bilibili short URL did not resolve to a video')
-        # A page explicitly present on the short URL takes precedence.
-        page = page if 'p' in parse_qs(urlsplit(url).query) else resolved_page
-        url = resolved_url
+    platform, url, page = resolve_input(request)
     out = Path(output).resolve()
     out.mkdir(parents=True, exist_ok=True)
     request_file = out / 'request.json'
@@ -122,7 +127,8 @@ def prepare(config, request, output, transcribe=False, screenshots=True, max_chu
             helper = Path(__file__).with_name('bili_one.py')
             run([sys.executable, str(helper), str(scripts / 'bili_fetch.py'), url, str(out), str(page)])
         else:
-            run([sys.executable, str(scripts / 'douyin_fetch.py'), url, str(out)])
+            media = ensure_runtime(config)
+            run([media['python'], str(scripts / 'douyin_fetch.py'), url, str(out)])
     metadata = json.loads(full_meta.read_text(encoding='utf-8'))
     selected = choose_page(metadata, page)
     selected_meta = dict(metadata, platform=platform, pages=[selected], duration=selected.get('duration', 0))
@@ -156,15 +162,15 @@ def prepare(config, request, output, transcribe=False, screenshots=True, max_chu
         duration = float(selected.get('duration') or 0)
         if duration > 300:
             try:
-                transcription = transcribe_page_chunked(
-                    meta_file, page, out, scripts / 'bili_transcribe.py',
+                transcription = transcribe_with_runtime(
+                    config, meta_file, page, out, scripts / 'bili_transcribe.py',
                     max_chunks_per_run=max_chunks_per_run, language=language, hotwords=terms)
                 transcription['mode'] = 'chunked'
             except ChunkedTranscriptionUnavailable as exc:
                 if chunk_manifest.exists():
                     raise RuntimeError('Cannot switch an existing chunk plan to whole-file ASR; restore ASR dependencies') from exc
-                transcription = transcribe_page_chunked(
-                    meta_file, page, out, scripts / 'bili_transcribe.py', max_chunks_per_run=max_chunks_per_run,
+                transcription = transcribe_with_runtime(
+                    config, meta_file, page, out, scripts / 'bili_transcribe.py', max_chunks_per_run=max_chunks_per_run,
                     language=language, hotwords=terms, whole_file=True)
                 transcription.update(mode='upstream_fallback', reason=str(exc))
                 warnings.append('Chunked ASR unavailable; whole-file ASR retained language/hotwords: ' + str(exc))
@@ -172,8 +178,8 @@ def prepare(config, request, output, transcribe=False, screenshots=True, max_chu
                 # ASR 本身的错误应保留给调用方处理，不能把部分 checkpoint 误报成完整结果。
                 raise
         else:
-            transcription = transcribe_page_chunked(
-                meta_file, page, out, scripts / 'bili_transcribe.py', max_chunks_per_run=max_chunks_per_run,
+            transcription = transcribe_with_runtime(
+                config, meta_file, page, out, scripts / 'bili_transcribe.py', max_chunks_per_run=max_chunks_per_run,
                 language=language, hotwords=terms, whole_file=True)
             transcription['mode'] = 'upstream_whole_file'
     available = transcript.exists() and bool(transcript.read_text(encoding='utf-8').strip())
@@ -205,7 +211,8 @@ def prepare(config, request, output, transcribe=False, screenshots=True, max_chu
         screenshot_status = 'unavailable'
         try:
             helper = Path(__file__).with_name('screenshots.py')
-            run([sys.executable, str(helper), str(scripts / 'bili_screenshot.py'), str(meta_file),
+            media = ensure_runtime(config)
+            run([media['python'], str(helper), str(scripts / 'bili_screenshot.py'), str(meta_file),
                  retained.get('transcript', str(transcript)), str(out / 'images')])
             candidate = out / 'images/manifest.json'
             if candidate.exists():

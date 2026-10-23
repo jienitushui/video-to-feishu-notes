@@ -240,19 +240,24 @@ CLI 使用 `.env.local` 中的 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 换取租
 ## 视频处理工具
 
     python scripts/vfn.py video install-upstream
-    python -m pip install -r cache/upstream/requirements.txt
+    python scripts/vfn.py video bootstrap
 
-默认固定提交 2497a7f564670c840f5e1c4055c8a536237cd5f3。目录已存在时停止，不覆盖。可配置已有上游目录，但版本须匹配，详见 upstream.md。首次下载 ASR 模型需要网络与磁盘空间；无字幕转写、截图才需要完整媒体依赖。
+默认固定提交 2497a7f564670c840f5e1c4055c8a536237cd5f3。目录已存在时停止，不覆盖。可配置已有上游目录，但版本须匹配，详见 upstream.md。bootstrap 仅准备媒体运行环境，不下载语音模型；首次 ASR 仍需下载模型并预留网络与空间。B站只获取字幕、预检和飞书发布不会触发媒体环境安装。
 
 抖音额外说明：固定版本的上游抖音脚本需要使用者自行获取 GPLv3 的 `abogus.py`，项目不会把它打包进仓库。运行抖音流程时若提示缺少该文件，请将固定 commit 对应文件放到 `cache/upstream/scripts/abogus.py`；脚本会校验 SHA-256、关键标记和 Python 编译结果。抖音签名还需要 `gmssl`：
 
-    python -m pip install gmssl
+    python scripts/vfn.py video bootstrap
 
-若启用无字幕本地转写和截图，还需要上游 requirements 中的 `faster-whisper`、`av`、`numpy`、`pillow`。本次联调还发现固定上游脚本与最新 PyAV 不兼容：出现 `open() got an unexpected keyword argument 'metadata_errors'` 时，将 PyAV 调整到兼容版本，例如：
+转写、截图和抖音获取会先检查当前 Python、已启用的独立环境、项目 .venv。都不可用时，自动查找已安装的 Python 3.10–3.12（Windows 包含 py 启动器列表），在 `cache/media-runtime/env-<唯一ID>` 建立独立环境。安装 `faster-whisper==1.2.1`、`av==12.3.0`、兼容范围的 numpy/pillow/gmssl；实际导入通过后才原子更新 active.json。PyAV 版本固定是为了兼容上游的 metadata_errors 调用。不会改动 CLI 的 Python、不重装项目主依赖、不下载语音模型。
 
-    python -m pip install --force-reinstall --only-binary=:all: av==12.3.0
+    python scripts/vfn.py doctor
+    python scripts/vfn.py video bootstrap
 
-安装后可用 `doctor` 检查 `optional_modules`，再重新运行 `video prepare --transcribe --screenshots`。
+bootstrap 可提前执行；通常直接 prepare 即会按需恢复。doctor 的 `media_runtime` 是实际导入结果，`asr_ready` 还要求上游转写脚本存在。`optional_modules` 只检查 CLI 当前环境的模块位置。
+
+可选配置：`auto_recover_runtime: false` 禁用自动新建；`media_runtime_path` 改独立环境目录（相对 config.json）。环境变量 `VFN_DISABLE_RUNTIME_RECOVERY=1`、`VFN_MEDIA_RUNTIME` 分别覆盖禁用开关和目录。`media_python` 或优先的 `VFN_MEDIA_PYTHON` 可指定已配置好的解释器（相对 config.json）；显式解释器不可用时直接报错，不悄悄另装。禁用新建仍可复用健康环境。
+
+安装前要求该磁盘至少 1 GiB 空闲，这只是安装下限，不是模型或视频空间保证。每次 pip 最多运行十分钟，共两次；失败只清理本次新环境，保留旧环境和所有任务素材。恢复后保持原输出目录、语言、热词续跑。`install.lock` 遗留时先确认原安装进程已结束，再人工删除该锁重试。没有适用 Python、离线无法下载依赖、缺少上游或抖音签名文件、平台登录以及 GPU 驱动问题，仍需按实际错误处理；不会自动下载系统 Python 或驱动。当前环境若连主 CLI 都无法启动，先按前面的基础安装步骤恢复。Windows 新建环境已实测，macOS/Linux 的实际安装尚未验证。
 
 主 Skill 不自动登录平台，不自动删除媒体缓存。B站登录由用户按需执行上游 bili_fetch.py --login，授权信息保存在上游本地配置。
 
@@ -261,6 +266,7 @@ CLI 使用 `.env.local` 中的 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 换取租
     python scripts/vfn.py enqueue '<视频链接>'
     python scripts/vfn.py enqueue '<视频链接>' --enabled --requirements '重点解释代码' --category 'AI'
     python scripts/vfn.py tasks --limit 3 --category 'AI'
+    python scripts/vfn.py video preflight '<本批视频链接1>' '<本批视频链接2>'
     python scripts/vfn.py claim <record_id>
     python scripts/vfn.py stage <record_id> --run-id <run_id> --stage '本地转写'
     python scripts/vfn.py video prepare '<表格中的完整原始输入>' --record-id <record_id> --version <生成版本> --transcribe --screenshots
@@ -269,6 +275,8 @@ CLI 使用 `.env.local` 中的 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 换取租
     python scripts/vfn.py publish <record_id> --run-id <run_id> --note output/<record_id>/v<生成版本>/note.json
 
 prepare 的原始输入必须与任务一致。有些上游脚本出错仍返回零退出码，适配器还检查实际转写文件。命令成功输出 ok=true 和 data；失败输出 ok=false、error_type、error 并退出 1。doctor 的 ok=true 表示检查已执行，配置完整性应看具体检查项。
+
+`video preflight` 只查询本批每条视频的元数据和输出文件系统剩余空间，无需飞书凭据。B站仅统计选定分 P，抖音只查询 detail，不下载视频或安装依赖。磁盘默认使用配置的 output_root，`--output-root` 可覆盖；不存在的目录按最近已有父目录检查。时长未知时 `total_minutes` 为 null，`known_total_minutes` 是已知部分；查看逐条 error 和 disk.error，`complete` 表示时长与空间信息是否齐全。重复输入按条目计入合计，不代表实际转写次数或去重结果。无耗时预测、空间需求估算或固定拦截规则。
 
 ASR 参数：`asr_language` 默认 `auto`；`asr_hotwords` 为可选术语字符串数组，独立于笔记展示语言 `language`。命令行 `--asr-language` 覆盖语言，重复 `--hotword` 追加术语；续跑保持设置一致。短视频整段、长视频分片均传入这些设置。原稿、校正版留存与 `video finalize-transcript` 使用见 [transcripts.md](transcripts.md)。这些本地命令不发布飞书文档。
 

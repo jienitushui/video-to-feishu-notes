@@ -17,6 +17,9 @@ from .tasks import Tasks
 from .video import prepare, install_upstream
 from .local_cleanup import apply_cleanup, canonical_version_dir, plan_cleanup
 from .transcripts import finalize_transcript
+from .preflight import preflight
+from .reading_index import refresh_reading_index
+from .runtime import ensure_runtime, inspect_runtime
 
 
 def parser():
@@ -83,6 +86,13 @@ def parser():
     export.add_argument('--manifest', required=True)
     export.add_argument('--output', required=True)
     video = sub.add_parser('video').add_subparsers(dest='action', required=True)
+    video.add_parser('bootstrap', help='Check or recover the isolated local media runtime (no model download)')
+    reading = video.add_parser('reading-index', help='Build local reading packets for a complete verified transcript')
+    reading.add_argument('--manifest', required=True)
+    reading.add_argument('--mark-read', nargs='+', default=[], help='IDs of packets actually read, e.g. part-0001')
+    check = video.add_parser('preflight', help='Read video durations and available output disk space without downloading media')
+    check.add_argument('urls', nargs='+')
+    check.add_argument('--output-root', help='Output filesystem to check; defaults to configured output_root')
     finalize = video.add_parser('finalize-transcript', help='Validate corrections while retaining the source transcript')
     finalize.add_argument('--manifest', required=True)
     finalize.add_argument('--corrections', required=True)
@@ -108,6 +118,8 @@ def execute(args):
     cmd = args.command
     if cmd == 'video' and args.action == 'finalize-transcript':
         return finalize_transcript(args.manifest, args.corrections)
+    if cmd == 'video' and args.action == 'reading-index':
+        return refresh_reading_index(args.manifest, args.mark_read)
     if cmd == 'validate-note':
         note, base = load_note(args.note)
         return validate_note(note, base)
@@ -125,6 +137,10 @@ def execute(args):
         return apply_cleanup(plan) if args.apply else plan
     config = Config.load(args.config)
     if cmd == 'video':
+        if args.action == 'bootstrap':
+            return ensure_runtime(config)
+        if args.action == 'preflight':
+            return preflight(config, args.urls, args.output_root)
         if args.action == 'install-upstream':
             return install_upstream(config, args.target)
         if args.output:
@@ -152,17 +168,17 @@ def execute(args):
         auth = bool((os.getenv('FEISHU_APP_ID') and os.getenv('FEISHU_APP_SECRET')) or
                     os.getenv('FEISHU_USER_ACCESS_TOKEN') or os.getenv('FEISHU_TENANT_ACCESS_TOKEN'))
         upstream_transcriber = config.local_path('upstream_path', 'cache/upstream') / 'scripts/bili_transcribe.py'
-        asr_missing = [name for name, ready in (
-            ('upstream_transcriber', upstream_transcriber.is_file()),
-            ('av', importlib.util.find_spec('av') is not None),
-            ('faster_whisper', importlib.util.find_spec('faster_whisper') is not None),
-        ) if not ready]
+        media = inspect_runtime(config)
+        asr_missing = ([] if upstream_transcriber.is_file() else ['upstream_transcriber'])
+        if not media['ready']:
+            asr_missing.append('media_runtime')
         report = {'python': sys.version.split()[0], 'python_executable': sys.executable,
                   'config_ready': configured, 'auth_configured': auth,
                   'publish_target': config.get('publish_target', 'folder'),
                   'upstream_installed': (config.local_path('upstream_path', 'cache/upstream') / 'scripts/bili_fetch.py').is_file(),
                   'optional_modules': {m: importlib.util.find_spec(m) is not None for m in ('av', 'faster_whisper', 'gmssl', 'numpy', 'PIL')},
                   'asr_ready': not asr_missing, 'asr_missing': asr_missing,
+                  'media_runtime': media,
                   'remote_checked': False}
         if args.remote:
             report['schema'] = tasks.schema()

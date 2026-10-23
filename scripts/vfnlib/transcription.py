@@ -307,7 +307,9 @@ def normalize_language(language):
     # Check against the installed ASR vocabulary without loading a model.
     try:
         from faster_whisper.tokenizer import _LANGUAGE_CODES
-    except ImportError:
+    except (ImportError, OSError, RuntimeError):
+        # Import-time DLL/ABI errors must not prevent the media runtime from
+        # recovering. The selected runtime validates the language again.
         _LANGUAGE_CODES = None
     if language != 'auto' and _LANGUAGE_CODES is not None and language not in _LANGUAGE_CODES:
         raise ValueError('Unsupported Whisper language: ' + language)
