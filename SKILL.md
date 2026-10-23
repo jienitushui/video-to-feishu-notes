@@ -41,13 +41,21 @@ description: 将 B站、抖音视频整理为图文课堂笔记并保存到飞�
 
 1. `python scripts/vfn.py tasks --limit 3` 读取已勾选、尚未完成的任务；用户指定分类时添加 `--category`。按用户批量上限执行，默认 3 条。没有明确重试要求时不选失败记录。
 2. `claim <record_id>` 领取一条任务，保存返回的 `run_id`。用户明确指定未勾选记录时加 `--requested`；明确重试失败记录时加 `--retry`；明确要求新版本时加 `--regenerate`。同表只运行一个执行者。
-3. 先用 `video prepare <视频链接> --output <独立工作目录> --no-screenshots` 获取所选分 P 的元数据和可用字幕，先查重再处理画面。抖音上游同时下载视频。需要本地转写时，长视频默认按可恢复片段处理，单次最多新增 3 个片段；任务返回 `transcribing` 时，后续调用继续使用同一工作目录并跳过已完成 checkpoint。
-4. `bind-source <record_id> --run-id <run_id> --manifest <manifest.json>` 写入视频唯一标识并检查可复用结果。若返回 `reused: true`，本条已完成。否则在同目录再次 prepare，默认提取截图，需要本地转写时加 `--transcribe --max-chunks-per-run 3`。截图独立于转写：优先按字幕关键词取候选画面，无字幕或无关键词时按视频时间分布抽帧。读取最新 manifest、合并后的完整文本和 image_manifest；单个 checkpoint 不能当作全文，候选帧即使 qc=ok 也须视觉复核，不能直接当成已选插图。长视频按全局时间轴分块理解并合并检查覆盖、重复和缺口。
+3. 先用 `video prepare <视频链接> --record-id <record_id> --version <生成版本> --output-root output --no-screenshots` 获取所选分 P 的元数据和可用字幕。所有准备、转写、截图、笔记和发布辅助文件统一放在 `output/<record_id>/v<生成版本>/`；只有需要兼容旧目录时才显式传 `--output`。需要本地转写时，长视频默认按可恢复片段处理，单次最多新增 3 个片段；任务返回 `transcribing` 时，后续调用继续使用同一版本目录并跳过已完成 checkpoint。
+4. `bind-source <record_id> --run-id <run_id> --manifest output/<record_id>/v<生成版本>/manifest.json` 写入视频唯一标识并检查可复用结果。若返回 `reused: true`，本条已完成。否则在同一版本目录再次 prepare，默认提取截图，需要本地转写时加 `--transcribe --max-chunks-per-run 3`。截图独立于转写：优先按字幕关键词取候选画面，无字幕或无关键词时按视频时间分布抽帧。读取最新 manifest、合并后的完整文本和 image_manifest；单个 checkpoint 不能当作全文，候选帧即使 qc=ok 也须视觉复核，不能直接当成已选插图。长视频按全局时间轴分块理解并合并检查覆盖、重复和缺口。
 5. 读取 [references/note-format.md](references/note-format.md)，结合完整文字和相关画面写 `note.json`，将有信息价值的截图作为 image 块放到对应解释附近，保留清单中的真实帧时间并写出具体图注。知识地图、概念卡片、自测题需与实际内容相称。重要观点、数字、步骤和代码必须能回到真实时间点；视频原话、转述、Agent 补充解释和不确定内容分开标记。无法核验的 ASR 或画面写“需要核对”，不能自行补全。无法获取截图、画面无关或用户明确要求纯文字时，填写具体的 text_only_reason；不能只因漏做截图就降级为纯文字。每完成关键阶段可调用 `stage` 更新表格进度。
 6. `validate-note <note.json>` 检查结构和图片路径，再运行 `publish <record_id> --run-id <run_id> --note <note.json>`。发布工具在配置目标创建或继续写入飞书草稿，插入图片、回读校验（知识库含节点归属）并回填结果；新版全部成功且表格链接回读一致后，按检查点清理旧主文档与备份。只有返回完成才报告发布成功；cleanup.pending 非零时同时说明旧版清理未完成，按恢复文档单独重试，不重新生成新版。
 7. 汇报已完成、复用、失败或待人工处理的任务及文档链接；新生成笔记说明插图数量，纯文字结果说明原因。both 模式按“笔记文档（知识库）”“备份文档（云盘）”报告两个链接，部分成功时说明主文档或备份哪一处未完成。不因本批用时较长而扩大用户授权的任务数。
 
 如需清理初始化表格留下的完全空白记录，先执行 `cleanup-empty` 只读预览；只有用户明确要求清理时才执行 `cleanup-empty --apply`。该命令不会删除已有任务。
+
+任务完成后，如需清理本地旧版本，先运行：
+
+```powershell
+python scripts/vfn.py cleanup-local <record_id> --version <当前生成版本>
+```
+
+确认预览中的候选目录后，才加 `--apply` 删除旧的本地版本。当前版本、任务未完成版本和默认不识别的旧平铺目录都会保留；清理本地目录不会删除飞书文档。旧目录如 `output/<record_id>-v2` 需要人工确认后，可额外使用 `--include-legacy`。
 
 ## 中断与失败
 

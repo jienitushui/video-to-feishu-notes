@@ -84,3 +84,7 @@ class Config:
     def local_path(self, key, default):
         path = Path(self.get(key, default)).expanduser()
         return path.resolve() if path.is_absolute() else (self.path.parent / path).resolve()
+
+    def workdir(self, record_id, version):
+        from .local_cleanup import canonical_version_dir
+        return canonical_version_dir(self.local_path('output_root', 'output'), record_id, version)

@@ -30,6 +30,7 @@ flowchart LR
 - 将笔记与图片写入飞书文档；默认在知识库保存主文档、在云盘文件夹保存生成时的备份副本，也支持仅云盘或仅知识库。
 - 支持去重、重新生成、有限重试和中断恢复。
 - 由用户主动启动，单执行者串行处理。
+- 本地工作文件统一按 `output/<record_id>/v<生成版本>/` 保存；任务完成后可用 `cleanup-local` 预览并清理旧版本，默认不触碰当前版本或旧式平铺目录。
 
 ## 安装与开始
 
@@ -52,6 +53,19 @@ python scripts/vfn.py schema
 python scripts/vfn.py schema --apply
 python scripts/vfn.py video install-upstream
 python -m pip install -r cache/upstream/requirements.txt
+```
+
+素材准备时推荐使用任务版本目录：
+
+```powershell
+python scripts/vfn.py video prepare "<视频链接>" --record-id <record_id> --version <生成版本> --transcribe --screenshots
+```
+
+任务完成后清理本地旧版本（先预览，确认后再加 `--apply`）：
+
+```powershell
+python scripts/vfn.py cleanup-local <record_id> --version <当前生成版本>
+python scripts/vfn.py cleanup-local <record_id> --version <当前生成版本> --apply
 ```
 
 支持 Windows、macOS、Linux 的 `vfn` 短命令：在仓库根目录用虚拟环境运行 `python -m pip install -e .`，将该环境的入口目录加入 PATH（或激活环境），即可运行 `vfn doctor`。原有 Python 命令仍可使用。

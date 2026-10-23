@@ -263,10 +263,10 @@ CLI 使用 `.env.local` 中的 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 换取租
     python scripts/vfn.py tasks --limit 3 --category 'AI'
     python scripts/vfn.py claim <record_id>
     python scripts/vfn.py stage <record_id> --run-id <run_id> --stage '本地转写'
-    python scripts/vfn.py video prepare '<表格中的完整原始输入>' --output output/<record_id>-v1 --transcribe --screenshots
-    python scripts/vfn.py bind-source <record_id> --run-id <run_id> --manifest output/<record_id>-v1/manifest.json
-    python scripts/vfn.py validate-note output/<record_id>-v1/note.json
-    python scripts/vfn.py publish <record_id> --run-id <run_id> --note output/<record_id>-v1/note.json
+    python scripts/vfn.py video prepare '<表格中的完整原始输入>' --record-id <record_id> --version <生成版本> --transcribe --screenshots
+    python scripts/vfn.py bind-source <record_id> --run-id <run_id> --manifest output/<record_id>/v<生成版本>/manifest.json
+    python scripts/vfn.py validate-note output/<record_id>/v<生成版本>/note.json
+    python scripts/vfn.py publish <record_id> --run-id <run_id> --note output/<record_id>/v<生成版本>/note.json
 
 prepare 的原始输入必须与任务一致。有些上游脚本出错仍返回零退出码，适配器还检查实际转写文件。命令成功输出 ok=true 和 data；失败输出 ok=false、error_type、error 并退出 1。doctor 的 ok=true 表示检查已执行，配置完整性应看具体检查项。
 

@@ -15,6 +15,7 @@ from .notes import load_note, markdown, validate_note
 from .publish import Publisher
 from .tasks import Tasks
 from .video import prepare, install_upstream
+from .local_cleanup import apply_cleanup, canonical_version_dir, plan_cleanup
 
 
 def parser():
@@ -29,6 +30,16 @@ def parser():
     cleanup = sub.add_parser('cleanup-empty', help='List empty Bitable rows; --apply deletes them')
     cleanup.add_argument('--apply', action='store_true')
     cleanup.add_argument('--limit', type=int, default=100)
+    local = sub.add_parser('cleanup-local', help='Preview or delete old local work versions; --apply is required to delete')
+    local.add_argument('record_id')
+    local.add_argument('--version', type=int, required=True,
+                       help='Current completed Feishu generation version; this version is protected')
+    local.add_argument('--output-root', default='output')
+    local.add_argument('--status', default='已完成',
+                       help='Remote task status; cleanup is blocked unless it is 已完成')
+    local.add_argument('--include-legacy', action='store_true',
+                       help='Include old flat directories such as <record_id>-v2; default is to leave them untouched')
+    local.add_argument('--apply', action='store_true')
     tasks = sub.add_parser('tasks')
     tasks.add_argument('--limit', type=int, default=3)
     tasks.add_argument('--category')
@@ -75,7 +86,10 @@ def parser():
     install.add_argument('--target')
     prep = video.add_parser('prepare')
     prep.add_argument('url')
-    prep.add_argument('--output', required=True)
+    prep.add_argument('--output', help='Explicit work directory; when omitted use output/<record_id>/v<version>/')
+    prep.add_argument('--record-id', help='Feishu record ID used for the canonical local work directory')
+    prep.add_argument('--version', type=int, help='Feishu generation version used for the canonical local work directory')
+    prep.add_argument('--output-root', default='output', help='Root for canonical local work directories')
     prep.add_argument('--transcribe', action='store_true')
     prep.add_argument('--max-chunks-per-run', type=int, default=3,
                       help='长视频单次最多新增的 ASR 片段数；0 表示本次处理全部片段')
@@ -97,11 +111,24 @@ def execute(args):
         out = Path(args.output)
         out.write_text(markdown(note, manifest['source']), encoding='utf-8')
         return {'output': str(out.resolve())}
+    if cmd == 'cleanup-local':
+        plan = plan_cleanup(args.output_root, args.record_id, args.version, args.status,
+                            include_legacy=args.include_legacy)
+        return apply_cleanup(plan) if args.apply else plan
     config = Config.load(args.config)
     if cmd == 'video':
         if args.action == 'install-upstream':
             return install_upstream(config, args.target)
-        return prepare(config, args.url, args.output, args.transcribe, args.screenshots,
+        if args.output:
+            if args.record_id or args.version:
+                raise ValueError('Use --output or --record-id/--version, not both')
+            output = args.output
+        else:
+            if not args.record_id or args.version is None:
+                raise ValueError('video prepare requires --output or both --record-id and --version')
+            output = str(canonical_version_dir(
+                config.local_path('output_root', args.output_root), args.record_id, args.version))
+        return prepare(config, args.url, output, args.transcribe, args.screenshots,
                        args.max_chunks_per_run)
     api = Feishu(config)
     tasks = Tasks(api, config)

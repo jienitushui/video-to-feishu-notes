@@ -157,14 +157,19 @@ class Tasks:
                     state['version_cleanup'] = cleanup
         run_id = uuid.uuid4().hex
         state['run_id'] = run_id
+        next_version = int(self.get(record, 'version', 0) or 0)
+        if state is not old_state or not old_state:
+            next_version += 1
         values = {'run_id': run_id, 'status': '处理中', 'stage': '校验输入', 'error': '',
                   'attempts': int(self.get(record, 'attempts', 0) or 0) + 1}
         if state is not old_state or not old_state:
             values.update(document_id='', source_key='', fingerprint='',
-                          version=int(self.get(record, 'version', 0) or 0) + 1)
+                          version=next_version)
         self.save_state(record_id, state, **values)
         self.own(record_id, run_id)
-        return {'record_id': record_id, 'run_id': run_id, 'state': state}
+        return {'record_id': record_id, 'run_id': run_id, 'version': next_version,
+                'workdir': str(self.config.workdir(record_id, next_version)),
+                'state': state}
 
     def stage(self, record_id, run_id, stage):
         record = self.own(record_id, run_id)
