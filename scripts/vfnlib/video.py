@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
+from .transcription import ChunkedTranscriptionUnavailable, transcribe_page_chunked
+
 UPSTREAM_URL = 'https://github.com/lucky-Luor/bilibili-douyin-notes.git'
 UPSTREAM_REVISION = '2497a7f564670c840f5e1c4055c8a536237cd5f3'
 
@@ -74,7 +76,7 @@ def choose_page(metadata, page):
     return matches[0]
 
 
-def prepare(config, request, output, transcribe=False, screenshots=True):
+def prepare(config, request, output, transcribe=False, screenshots=True, max_chunks_per_run=3):
     if sys.version_info < (3, 10):
         raise ValueError('Video processing requires Python 3.10 or newer')
     upstream = config.local_path('upstream_path', 'cache/upstream')
@@ -117,12 +119,43 @@ def prepare(config, request, output, transcribe=False, screenshots=True):
     meta_file = out / 'selected-metadata.json'
     meta_file.write_text(json.dumps(selected_meta, ensure_ascii=False, indent=2), encoding='utf-8')
     transcript = out / ('{:02d}_{}.txt'.format(page, safe_part(selected['part'])))
-    if transcribe and (not transcript.exists() or not transcript.read_text(encoding='utf-8').strip()):
-        run([sys.executable, str(scripts / 'bili_transcribe.py'), str(meta_file), '--page', str(page)])
-    available = transcript.exists() and bool(transcript.read_text(encoding='utf-8').strip())
-    if transcribe and not available:
-        raise RuntimeError('Upstream returned without producing a usable transcript; inspect upstream output')
     warnings = []
+    transcription = {'mode': 'existing_or_upstream', 'status': 'not_requested',
+                     'max_chunks_per_run': max_chunks_per_run}
+    chunk_manifest = out / 'chunk-manifest.json'
+    chunk_pending = False
+    if chunk_manifest.exists():
+        try:
+            chunk_pending = json.loads(chunk_manifest.read_text(encoding='utf-8')).get('status') != 'prepared'
+        except (OSError, ValueError, TypeError):
+            chunk_pending = True
+    if transcribe and (not transcript.exists() or not transcript.read_text(encoding='utf-8').strip() or chunk_pending):
+        # 长内容优先走可恢复的分片 ASR；短内容保留上游路径，避免额外的音频切片开销。
+        duration = float(selected.get('duration') or 0)
+        if duration > 300 and max_chunks_per_run >= 0:
+            try:
+                transcription = transcribe_page_chunked(
+                    meta_file, page, out, scripts / 'bili_transcribe.py',
+                    max_chunks_per_run=max_chunks_per_run)
+                transcription['mode'] = 'chunked'
+            except ChunkedTranscriptionUnavailable as exc:
+                transcription = {'mode': 'upstream_fallback', 'status': 'fallback',
+                                 'reason': str(exc), 'max_chunks_per_run': max_chunks_per_run}
+                warnings.append('Chunked ASR unavailable; fell back to upstream whole-file transcription: ' + str(exc))
+                run([sys.executable, str(scripts / 'bili_transcribe.py'), str(meta_file), '--page', str(page)])
+            except Exception:
+                # ASR 本身的错误应保留给调用方处理，不能把部分 checkpoint 误报成完整结果。
+                raise
+        else:
+            run([sys.executable, str(scripts / 'bili_transcribe.py'), str(meta_file), '--page', str(page)])
+            transcription['mode'] = 'upstream_whole_file'
+            transcription['status'] = 'completed'
+    available = transcript.exists() and bool(transcript.read_text(encoding='utf-8').strip())
+    if transcription.get('mode') == 'chunked' and transcription.get('status') != 'prepared':
+        available = False
+    if transcribe and not available and not (transcription.get('mode') == 'chunked' and
+                                             transcription.get('status') == 'transcribing'):
+        raise RuntimeError('Upstream returned without producing a usable transcript; inspect upstream output')
     if not available:
         warnings.append('No usable transcript; rerun with --transcribe after installing ASR dependencies')
     image_manifest = None
@@ -159,7 +192,8 @@ def prepare(config, request, output, transcribe=False, screenshots=True):
               'owner': metadata.get('owner', ''), 'duration': selected.get('duration', 0)}
     manifest = {'schema_version': 1, 'request': request, 'source': source, 'upstream_revision': actual,
                 'metadata': str(meta_file), 'transcript': str(transcript) if available else None,
-                'image_manifest': image_manifest, 'screenshot_status': screenshot_status, 'warnings': warnings}
+                'image_manifest': image_manifest, 'screenshot_status': screenshot_status,
+                'transcription': transcription, 'warnings': warnings}
     target = out / 'manifest.json'
     target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
     return dict(manifest, manifest=str(target))

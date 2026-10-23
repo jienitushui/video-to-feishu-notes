@@ -77,6 +77,8 @@ def parser():
     prep.add_argument('url')
     prep.add_argument('--output', required=True)
     prep.add_argument('--transcribe', action='store_true')
+    prep.add_argument('--max-chunks-per-run', type=int, default=3,
+                      help='长视频单次最多新增的 ASR 片段数；0 表示本次处理全部片段')
     prep.add_argument('--screenshots', action=argparse.BooleanOptionalAction, default=True,
                       help='Extract screenshot candidates by default; --no-screenshots for initial source lookup')
     return ap
@@ -99,7 +101,8 @@ def execute(args):
     if cmd == 'video':
         if args.action == 'install-upstream':
             return install_upstream(config, args.target)
-        return prepare(config, args.url, args.output, args.transcribe, args.screenshots)
+        return prepare(config, args.url, args.output, args.transcribe, args.screenshots,
+                       args.max_chunks_per_run)
     api = Feishu(config)
     tasks = Tasks(api, config)
     if cmd == 'doctor':
