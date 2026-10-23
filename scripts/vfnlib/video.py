@@ -74,7 +74,7 @@ def choose_page(metadata, page):
     return matches[0]
 
 
-def prepare(config, request, output, transcribe=False, screenshots=False):
+def prepare(config, request, output, transcribe=False, screenshots=True):
     if sys.version_info < (3, 10):
         raise ValueError('Video processing requires Python 3.10 or newer')
     upstream = config.local_path('upstream_path', 'cache/upstream')
@@ -126,22 +126,26 @@ def prepare(config, request, output, transcribe=False, screenshots=False):
     if not available:
         warnings.append('No usable transcript; rerun with --transcribe after installing ASR dependencies')
     image_manifest = None
+    screenshot_status = 'not_requested'
     if screenshots:
-        if not available:
-            warnings.append('Screenshots skipped because the transcript is missing')
-        else:
-            run([sys.executable, str(scripts / 'bili_screenshot.py'), str(meta_file), str(out),
-                 str(out / 'images'), str(page), '--ascii-names'])
+        screenshot_status = 'unavailable'
+        try:
+            helper = Path(__file__).with_name('screenshots.py')
+            run([sys.executable, str(helper), str(scripts / 'bili_screenshot.py'), str(meta_file),
+                 str(transcript), str(out / 'images')])
             candidate = out / 'images/manifest.json'
             if candidate.exists():
                 image_manifest = str(candidate)
                 frames = json.loads(candidate.read_text(encoding='utf-8')).get('frames', [])
+                screenshot_status = 'review_required' if frames else 'unavailable'
                 if not frames:
                     warnings.append('No screenshots were produced; inspect the video or explain a text-only result')
-                if any(f.get('qc') != 'ok' for f in frames):
-                    warnings.append('Some frames need visual review; do not include them blindly')
+                if frames:
+                    warnings.append('Review screenshot candidates visually and add relevant image blocks to note.json')
             else:
-                warnings.append('Upstream did not produce a screenshot manifest')
+                warnings.append('Screenshot extraction did not produce a manifest')
+        except (RuntimeError, OSError, ValueError) as exc:
+            warnings.append('Screenshot extraction failed: ' + str(exc))
     if platform == 'bilibili':
         video_id = metadata['bvid']
         canonical = 'https://www.bilibili.com/video/{}?p={}'.format(video_id, page)
@@ -155,7 +159,7 @@ def prepare(config, request, output, transcribe=False, screenshots=False):
               'owner': metadata.get('owner', ''), 'duration': selected.get('duration', 0)}
     manifest = {'schema_version': 1, 'request': request, 'source': source, 'upstream_revision': actual,
                 'metadata': str(meta_file), 'transcript': str(transcript) if available else None,
-                'image_manifest': image_manifest, 'warnings': warnings}
+                'image_manifest': image_manifest, 'screenshot_status': screenshot_status, 'warnings': warnings}
     target = out / 'manifest.json'
     target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
     return dict(manifest, manifest=str(target))

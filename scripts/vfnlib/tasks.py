@@ -145,6 +145,16 @@ class Tasks:
             else:
                 state = {'input': self.snapshot(record), 'generation': uuid.uuid4().hex,
                          'force': bool(new_version), 'publish': {}}
+                # Retain cleanup work across failed/replaced generations. Only verified
+                # published results are eligible; arbitrary pasted links are never deleted.
+                cleanup = [dict(item) for item in old_state.get('version_cleanup', [])
+                           if item.get('status') != 'deleted']
+                previous = old_state.get('published')
+                for target in self.superseded_targets(record, previous):
+                    if not any(item['document_id'] == target['document_id'] for item in cleanup):
+                        cleanup.append(dict(target, status='pending'))
+                if cleanup:
+                    state['version_cleanup'] = cleanup
         run_id = uuid.uuid4().hex
         state['run_id'] = run_id
         values = {'run_id': run_id, 'status': '处理中', 'stage': '校验输入', 'error': '',
@@ -184,6 +194,22 @@ class Tasks:
             return targets
         return {destination['type']: published}
 
+    def superseded_targets(self, record, previous):
+        # A legacy checkpoint or a manually replaced link is not deletion evidence.
+        if not previous:
+            return []
+        try:
+            targets = list(self.result_targets(previous).values())
+            if any(not all(target.get(key) for key in ('document_id', 'url', 'hash', 'destination'))
+                   for target in targets):
+                return []
+            if any(text(self.get(record, key)) != text(value)
+                   for key, value in self.result_links(previous, '').items()):
+                return []
+        except (KeyError, TypeError, TaskError):
+            return []
+        return targets
+
     def result_links(self, published, title):
         targets = self.result_targets(published)
         values = {'document': {'link': published['url'], 'text': title}}
@@ -218,6 +244,10 @@ class Tasks:
                 candidate = self.state(other)
                 published = candidate.get('published')
                 if not published or not published.get('document_id'):
+                    continue
+                quality = published.get('note_quality', {})
+                if not quality.get('images') and not quality.get('text_only_reason'):
+                    # Old text-only results must not bypass the new image requirement via reuse.
                     continue
                 # Content can be reused only within the requested archive location.
                 # Legacy results without a destination need a new publication.

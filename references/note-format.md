@@ -12,6 +12,8 @@ note.json 由 Agent 编写，脚本仅验证与发布，不调用额外模型 AP
 
 顶层字段：schema_version=1；非空 title（最多 200 字符）；summary（最多 2000）；source_key（与素材 manifest.source.key 相同）；sections（1–100 节）。每节包含唯一 id、title、非空 blocks。
 
+图文笔记至少包含一个经过视觉复核的 image 块。没有图片时必须填写顶层 text_only_reason（1–1000 字符），解释实际提取失败、没有相关画面或用户要求纯文字的原因；该说明会显示在飞书正文和 Markdown 中，validate-note 会返回警告。图片路径存在并不等于笔记已插图，必须写入 blocks。已有冻结草稿按原内容恢复，不为补图改动同代笔记；补图应生成新版本。
+
 | type | 字段 | 写入效果 |
 |---|---|---|
 | text | text，可选 seconds | 段落 |
@@ -22,6 +24,8 @@ note.json 由 Agent 编写，脚本仅验证与发布，不调用额外模型 AP
 text 内容是纯文本，首版不解释正文的 Markdown 加粗、HTML 或表格。对比可用列表表达。来源和回看链接由发布器根据可信元数据生成。
 
 图片相对 note.json 所在目录，必须位于该工作目录内；支持 png/jpg/jpeg/webp，最大 20 MiB。禁止本机绝对路径、上级目录和远程图片 URL。换设备需保留相同相对路径和图片内容。
+
+prepare 默认生成 images/manifest.json 候选清单，frames 中的 file 相对该清单目录、t 是实际解码帧的秒数。无字幕时可按时间分布抽帧；这些帧只供复核，不代表已理解视频内容。选择与章节相关的画面，用 images/<file> 作为 note.json 中的 path，t 作为 seconds，并将 caption 改为具体说明；不要把候选图的通用提示当成最终图注。首次查重可用 --no-screenshots 跳过提取，确定需要新生成后再默认 prepare。
 
 同代笔记首次发布后冻结，内容或图片变化会触发哈希不一致。恢复原文件继续，或显式开启新版本。
 

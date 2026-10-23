@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from vfnlib.config import Config
 from vfnlib.video import prepare, UPSTREAM_REVISION, safe_part
+from vfnlib.cli import parser
 
 
 class VideoTests(unittest.TestCase):
@@ -52,6 +53,43 @@ class VideoTests(unittest.TestCase):
             Path(manifest['transcript']).unlink()
             with self.assertRaisesRegex(RuntimeError, 'usable transcript'):
                 prepare(self.config, self.url, self.out, transcribe=True)
+
+    def test_default_screenshots_do_not_require_a_transcript(self):
+        def runner(command, cwd=None):
+            result = self.runner(command, cwd)
+            if 'bili_one.py' in str(command[1]):
+                next(self.out.glob('*.txt')).unlink()
+            if Path(command[1]).name == 'screenshots.py':
+                image_dir = self.out / 'images'
+                image_dir.mkdir(exist_ok=True)
+                (image_dir / 'manifest.json').write_text(json.dumps({'frames': [{'t': 10, 'qc': 'ok'}]}))
+            return result
+
+        with patch('vfnlib.video.run', side_effect=runner):
+            manifest = prepare(self.config, self.url, self.out)
+        self.assertIsNone(manifest['transcript'])
+        self.assertEqual(manifest['screenshot_status'], 'review_required')
+        self.assertIsNotNone(manifest['image_manifest'])
+
+    def test_screenshot_failure_is_reported_in_material_manifest(self):
+        def runner(command, cwd=None):
+            if Path(command[1]).name == 'screenshots.py':
+                raise RuntimeError('decoder unavailable')
+            return self.runner(command, cwd)
+
+        with patch('vfnlib.video.run', side_effect=runner):
+            manifest = prepare(self.config, self.url, self.out)
+        self.assertEqual(manifest['screenshot_status'], 'unavailable')
+        self.assertIsNone(manifest['image_manifest'])
+        self.assertTrue(any('decoder unavailable' in warning for warning in manifest['warnings']))
+
+    def test_source_lookup_can_skip_screenshots_explicitly(self):
+        with patch('vfnlib.video.run', side_effect=self.runner) as run:
+            manifest = prepare(self.config, self.url, self.out, screenshots=False)
+        self.assertEqual(manifest['screenshot_status'], 'not_requested')
+        self.assertFalse(any(Path(call.args[0][1]).name == 'screenshots.py' for call in run.call_args_list))
+        self.assertTrue(parser().parse_args(['video', 'prepare', self.url, '--output', 'out']).screenshots)
+        self.assertFalse(parser().parse_args(['video', 'prepare', self.url, '--output', 'out', '--no-screenshots']).screenshots)
 
 
 if __name__ == '__main__':

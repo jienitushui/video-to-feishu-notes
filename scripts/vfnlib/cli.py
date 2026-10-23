@@ -47,7 +47,7 @@ def parser():
     claim.add_argument('record_id')
     for option in ('requested', 'retry', 'regenerate', 'resume'):
         claim.add_argument('--' + option, action='store_true')
-    for name in ('stage', 'fail', 'bind-source', 'publish', 'attach-document'):
+    for name in ('stage', 'fail', 'bind-source', 'publish', 'cleanup-versions', 'attach-document'):
         cmd = sub.add_parser(name)
         cmd.add_argument('record_id')
         cmd.add_argument('--run-id', required=True)
@@ -58,7 +58,7 @@ def parser():
             cmd.add_argument('--manual', action='store_true')
         elif name == 'bind-source':
             cmd.add_argument('--manifest', required=True)
-        elif name == 'publish':
+        elif name in ('publish', 'cleanup-versions'):
             cmd.add_argument('--note', required=True)
         else:
             cmd.add_argument('--document-id', required=True)
@@ -77,7 +77,8 @@ def parser():
     prep.add_argument('url')
     prep.add_argument('--output', required=True)
     prep.add_argument('--transcribe', action='store_true')
-    prep.add_argument('--screenshots', action='store_true')
+    prep.add_argument('--screenshots', action=argparse.BooleanOptionalAction, default=True,
+                      help='Extract screenshot candidates by default; --no-screenshots for initial source lookup')
     return ap
 
 
@@ -153,8 +154,13 @@ def execute(args):
         manifest = json.loads(Path(args.manifest).read_text(encoding='utf-8-sig'))
         return tasks.bind(args.record_id, args.run_id, manifest)
     if cmd == 'publish':
-        note, base = load_note(args.note)
+        # Publisher enforces the image requirement for new drafts, preserving frozen recovery plans.
+        note, base = load_note(args.note, require_images=False)
         return Publisher(tasks).publish(args.record_id, args.run_id, note, base)
+    if cmd == 'cleanup-versions':
+        from .cleanup import VersionCleanup
+        note, base = load_note(args.note, require_images=False)
+        return VersionCleanup(tasks).run(args.record_id, args.run_id, note, base)
     if cmd == 'attach-document':
         return Publisher(tasks).attach(args.record_id, args.run_id, args.document_id, args.target)
     raise ValueError('Unknown command')

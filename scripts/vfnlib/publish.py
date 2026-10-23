@@ -4,7 +4,7 @@ import time
 import uuid
 
 from .feishu import AmbiguousWrite, FeishuError
-from .notes import plan_note
+from .notes import plan_note, validate_note
 from .tasks import TaskError, digest
 
 
@@ -50,6 +50,7 @@ class Publisher:
         source = state.get('source')
         if not source or note['source_key'] != source['key']:
             raise TaskError('Bind a matching source before publishing')
+        quality = validate_note(note, base, require_images=not bool(state.get('publish', {}).get('hash')))
         marker = 'VFN task={} generation={}'.format(record_id, state['generation'])
         plan = plan_note(note, base, source, marker)
         # Absolute paths differ across devices; content and image hashes define identity.
@@ -89,11 +90,35 @@ class Publisher:
                                             document_id, plan, plan_hash, note)
         fresh = self.tasks.own(record_id, run_id)
         self.tasks.assert_input(fresh, state)
+        published['note_quality'] = {'images': quality['images'],
+                                     'text_only_reason': note.get('text_only_reason') if not quality['images'] else None}
         state['published'] = published
         self.tasks.save_state(record_id, state, status='已完成', stage='完成',
                               **self.tasks.result_links(published, note['title']), summary=note['summary'],
                               completed_at=int(time.time() * 1000), result='新生成', regenerate=False, error='')
-        return dict(published, record_id=record_id, status='已完成')
+        result = dict(published, record_id=record_id, status='已完成', warnings=quality['warnings'])
+        if state.get('version_cleanup'):
+            from .cleanup import VersionCleanup
+            try:
+                result['cleanup'] = VersionCleanup(self.tasks).run(record_id, run_id, note, base)
+                result['warnings'] += result['cleanup']['warnings']
+            except Exception as exc:
+                # The new version is already committed; cleanup failure must not
+                # turn it into a failed publication or create another generation.
+                result['cleanup'] = {'pending': True}
+                result['warnings'].append('New version completed; old-version cleanup pending: ' + str(exc))
+                try:
+                    cleanup = VersionCleanup(self.tasks)
+                    _, fresh_state = cleanup.current(record_id, run_id, state['generation'])
+                    for item in fresh_state.get('version_cleanup', []):
+                        if item.get('status') != 'deleted':
+                            item['error'] = str(exc)
+                    cleanup.save(record_id, run_id, state['generation'], fresh_state,
+                                 stage='完成，旧版清理待重试')
+                except Exception:
+                    # A changed owner/input/link must not be overwritten here.
+                    pass
+        return result
 
     def save_target(self, record_id, state, pub, **values):
         document_id = values.get('document_id')
@@ -115,6 +140,7 @@ class Publisher:
             raise TaskError('Final document block verification failed')
         if any('path' in item and not block.get('image', {}).get('token') for block, item in zip(final, plan)):
             raise TaskError('Image token missing after publication')
+        return final
 
     def publish_target(self, record_id, run_id, state, pub, destination, document_id, plan, plan_hash, note):
         if pub.get('destination') != destination:

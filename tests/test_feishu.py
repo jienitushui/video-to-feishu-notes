@@ -1,5 +1,9 @@
+import json
+import hashlib
 import sys
+import tempfile
 import unittest
+from unittest.mock import Mock
 from pathlib import Path
 
 import requests
@@ -150,6 +154,63 @@ class FeishuTests(unittest.TestCase):
         with self.assertRaisesRegex(FeishuError, 'permission denied'):
             api.request('GET', '/path')
         self.assertEqual(len(session.calls), 1)
+
+    def test_docx_image_upload_binds_media_to_image_block(self):
+        api, _ = self.api([])
+        api.request = Mock(side_effect=[{'file_token': 'media-token'}, {}])
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / 'frame.png'
+            image.write_bytes(b'image-content')
+            self.assertEqual(api.upload_image('document-id', 'image-block-id', image), 'media-token')
+        upload, replace = api.request.call_args_list
+        self.assertEqual(upload.args, ('POST', '/drive/v1/medias/upload_all'))
+        self.assertEqual(upload.kwargs['data']['parent_type'], 'docx_image')
+        self.assertEqual(upload.kwargs['data']['parent_node'], 'image-block-id')
+        self.assertEqual(json.loads(upload.kwargs['data']['extra']), {'drive_route_token': 'document-id'})
+        self.assertEqual(replace.args, ('PATCH', '/docx/v1/documents/document-id/blocks/image-block-id'))
+        self.assertEqual(replace.kwargs['body'], {'replace_image': {'token': 'media-token'}})
+
+    def test_delete_document_uses_docx_drive_api_without_replaying_unknown_result(self):
+        api, session = self.api([Response({'code': 0, 'data': {}})])
+        api.delete_document('doc1')
+        self.assertEqual(session.calls[0][0], 'DELETE')
+        self.assertTrue(session.calls[0][1].endswith('/drive/v1/files/doc1'))
+        self.assertEqual(session.calls[0][2]['params'], {'type': 'docx'})
+        api, session = self.api([requests.Timeout()])
+        with self.assertRaises(AmbiguousWrite):
+            api.delete_document('doc1')
+        self.assertEqual(len(session.calls), 1)
+
+    def test_deleted_document_codes_exclude_permission_and_unknown_errors(self):
+        for code in (1770002, 1770003):
+            api, _ = self.api([Response({'code': code, 'msg': 'deleted'}, 404)])
+            self.assertTrue(api.document_deleted('old'))
+        for code, status in ((1770032, 403), (99991672, 403), (None, 404)):
+            api, _ = self.api([Response({'code': code, 'msg': 'unconfirmed'}, status)])
+            with self.assertRaises(FeishuError):
+                api.document_deleted('old')
+        api, _ = self.api([Response({'data': {'document': {'document_id': 'new'}}})])
+        self.assertFalse(api.document_deleted('new'))
+
+    def test_remote_image_hash_uses_downloaded_bytes_and_rejects_unreadable_media(self):
+        response = Response()
+        response.content = b'actual remote image bytes'
+        api, session = self.api([response])
+        self.assertEqual(api.image_sha256('image-token'), hashlib.sha256(response.content).hexdigest())
+        self.assertTrue(session.calls[0][1].endswith('/medias/image-token/download'))
+        for response in (Response(status=403), requests.Timeout()):
+            api, _ = self.api([response])
+            with self.assertRaises(FeishuError):
+                api.image_sha256('image-token')
+
+    def test_deleted_wiki_node_requires_not_found_and_excludes_permission_error(self):
+        api, _ = self.api([Response({'code': 131005, 'msg': 'node not found'}, 404)])
+        self.assertTrue(api.wiki_node_deleted('old-node'))
+        api, _ = self.api([Response({'data': {'node': {'node_token': 'old-node'}}})])
+        self.assertFalse(api.wiki_node_deleted('old-node'))
+        api, _ = self.api([Response({'code': 131006, 'msg': 'no permission'}, 403)])
+        with self.assertRaises(FeishuError):
+            api.wiki_node_deleted('old-node')
 
 
 if __name__ == '__main__':

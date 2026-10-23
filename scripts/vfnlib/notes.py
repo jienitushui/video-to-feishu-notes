@@ -6,10 +6,10 @@ import math
 from pathlib import Path
 
 
-def load_note(path):
+def load_note(path, require_images=True):
     path = Path(path).resolve()
     note = json.loads(path.read_text(encoding='utf-8-sig'))
-    validate_note(note, path.parent)
+    validate_note(note, path.parent, require_images=require_images)
     return note, path.parent
 
 
@@ -28,7 +28,7 @@ def image_path(base, value):
     return path
 
 
-def validate_note(note, base):
+def validate_note(note, base, require_images=True):
     if not isinstance(note, dict) or note.get('schema_version') != 1:
         raise ValueError('note.json requires schema_version: 1')
     for key, maximum in [('title', 200), ('summary', 2000), ('source_key', 250)]:
@@ -67,8 +67,14 @@ def validate_note(note, base):
                                        not isinstance(block['seconds'], (int, float)) or
                                        not math.isfinite(block['seconds']) or block['seconds'] < 0):
                 raise ValueError('seconds must be a nonnegative number')
-    return {'valid': True, 'sections': len(sections),
-            'images': sum(b['type'] == 'image' for s in sections for b in s['blocks'])}
+    images = sum(b['type'] == 'image' for s in sections for b in s['blocks'])
+    reason = note.get('text_only_reason')
+    if reason is not None and (not isinstance(reason, str) or not reason.strip() or len(reason) > 1000):
+        raise ValueError('text_only_reason must be a nonempty explanation of at most 1000 characters')
+    if require_images and not images and not reason:
+        raise ValueError('Note has no screenshots: add reviewed image blocks, or explain why in text_only_reason')
+    return {'valid': True, 'sections': len(sections), 'images': images,
+            'warnings': ['纯文字笔记：' + reason] if not images and reason else []}
 
 
 def stamp(seconds):
@@ -97,6 +103,8 @@ def plan_note(note, base, source, marker):
     plan = [{'block': text_block(marker)}, {'block': text_block(note['title'], 'heading1')},
             {'block': text_block('来源：' + source['title'], link=source['url'])},
             {'block': text_block(note['summary'], 'quote')}]
+    if note.get('text_only_reason') and not any(b['type'] == 'image' for s in note['sections'] for b in s['blocks']):
+        plan.append({'block': text_block('未附截图原因：' + note['text_only_reason'])})
     for section in note['sections']:
         plan.append({'block': text_block(section['title'], 'heading2')})
         for block in section['blocks']:
@@ -122,6 +130,8 @@ def plan_note(note, base, source, marker):
 
 def markdown(note, source):
     lines = ['# ' + note['title'], '', '> ' + note['summary'], '', '[原视频](' + source['url'] + ')', '']
+    if note.get('text_only_reason') and not any(b['type'] == 'image' for s in note['sections'] for b in s['blocks']):
+        lines.extend(['> 未附截图原因：' + note['text_only_reason'], ''])
     for section in note['sections']:
         lines.extend(['## ' + section['title'], ''])
         for block in section['blocks']:

@@ -1,8 +1,10 @@
 import copy
+import hashlib
 import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -11,6 +13,7 @@ from vfnlib.config import Config
 from vfnlib.feishu import AmbiguousWrite, FeishuError
 from vfnlib.notes import load_note, validate_note
 from vfnlib.publish import Publisher
+from vfnlib.cleanup import VersionCleanup
 from vfnlib.tasks import Tasks, TaskError
 from vfnlib.video import classify, safe_part
 
@@ -28,6 +31,10 @@ class MemoryFeishu:
         self.ambiguous_create = False
         self.lose_checkpoint = False
         self.image_uploads = 0
+        self.doc_sequence = 0
+        self.wiki_sequence = 0
+        self.deletions = []
+        self.image_content = {}
 
     def add(self, record_id, url='https://www.bilibili.com/video/BV1Wv411h7kN?p=19', **fields):
         self.rows[record_id] = {'record_id': record_id, 'fields': {
@@ -50,7 +57,8 @@ class MemoryFeishu:
         return self.record(record_id)
 
     def create_document(self, title):
-        did = 'doc' + str(len(self.docs) + 1)
+        self.doc_sequence += 1
+        did = 'doc' + str(self.doc_sequence)
         self.docs[did] = {'document_id': did, 'title': title, 'blocks': []}
         if self.ambiguous_create:
             self.ambiguous_create = False
@@ -61,13 +69,26 @@ class MemoryFeishu:
         document = self.docs[document_id]
         return {'document_id': document_id, 'title': document['title']}
 
+    def document_deleted(self, document_id):
+        return document_id not in self.docs
+
+    def wiki_node_deleted(self, token):
+        return token not in self.wiki_nodes
+
+    def delete_document(self, document_id):
+        self.deletions.append(document_id)
+        del self.docs[document_id]
+        self.wiki_nodes = {key: node for key, node in self.wiki_nodes.items()
+                           if node['obj_token'] != document_id}
+
     def create_wiki_node(self, title):
         ambiguous, self.ambiguous_create = self.ambiguous_create, False
         document = self.create_document(title)
-        token = 'wiki' + str(len(self.wiki_nodes) + 1)
+        self.wiki_sequence += 1
+        token = 'wiki' + str(self.wiki_sequence)
         node = {'node_token': token, 'obj_token': document['document_id'], 'title': title,
                 'obj_type': 'docx', 'node_type': 'origin', 'space_id': '123',
-                'parent_node_token': 'parent'}
+                'parent_node_token': 'parent', 'has_child': False}
         self.wiki_nodes[token] = node
         if ambiguous:
             raise AmbiguousWrite('connection lost after wiki creation')
@@ -94,11 +115,16 @@ class MemoryFeishu:
         return copy.deepcopy(block)
 
     def upload_image(self, document_id, block_id, path):
+        token = 'img-' + document_id + '-' + block_id
+        self.image_content[token] = path.read_bytes()
         for block in self.docs[document_id]['blocks']:
             if block['block_id'] == block_id:
-                block['image']['token'] = 'img-token'
+                block['image']['token'] = token
         self.image_uploads += 1
-        return 'img-token'
+        return token
+
+    def image_sha256(self, token):
+        return hashlib.sha256(self.image_content[token]).hexdigest()
 
 
 SOURCE = {'key': 'bilibili:BV1Wv411h7kN:p19', 'platform': 'bilibili',
@@ -116,6 +142,7 @@ class WorkflowTests(unittest.TestCase):
         self.tasks = Tasks(self.api, self.config)
         self.publisher = Publisher(self.tasks)
         self.note = {'schema_version': 1, 'title': 'Test', 'summary': 'Summary', 'source_key': SOURCE['key'],
+                     'text_only_reason': 'The source is an audio-only lecture with no relevant visual content.',
                      'sections': [{'id': 'intro', 'title': 'Introduction',
                                    'blocks': [{'type': 'text', 'text': 'Explanation', 'seconds': 3}]}]}
 
@@ -205,7 +232,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(AmbiguousWrite):
             self.publish(run)
         self.publish(self.tasks.claim('rec1', resume=True)['run_id'])
-        self.assertEqual([len(d['blocks']) for d in self.api.docs.values()], [7, 7])
+        self.assertEqual([len(d['blocks']) for d in self.api.docs.values()], [8, 8])
 
     def test_both_unknown_wiki_creation_requires_target_specific_attachment(self):
         from unittest.mock import patch
@@ -300,7 +327,8 @@ class WorkflowTests(unittest.TestCase):
         self.publish(run)
         for field in ('笔记文档', '备份文档'):
             self.assertNotEqual(self.api.rows['rec1']['fields'][field], old[field])
-        self.assertEqual(len(self.api.docs), 4)
+        self.assertEqual(set(self.api.docs), {'doc3', 'doc4'})
+        self.assertEqual(self.api.deletions, ['doc1', 'doc2'])
 
     def test_both_changed_config_or_notes_preserve_completed_copy(self):
         from unittest.mock import patch
@@ -407,7 +435,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.publish(run)
         result = self.publish(run)
-        self.assertEqual(result['blocks'], 7)
+        self.assertEqual(result['blocks'], 8)
         self.assertEqual(len(self.api.wiki_nodes), 1)
 
     def test_wiki_unknown_creation_requires_verified_attachment(self):
@@ -483,7 +511,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.api.rows['rec1']['fields']['笔记文档']['link'], old)
         result = self.publish(run)
         self.assertNotEqual(old, result['url'])
-        self.assertEqual(len(self.api.wiki_nodes), 2)
+        self.assertEqual(len(self.api.wiki_nodes), 1)
+        self.assertEqual(self.api.deletions, ['doc1'])
 
     def test_changed_destination_stops_resume(self):
         self.use_wiki()
@@ -564,7 +593,7 @@ class WorkflowTests(unittest.TestCase):
         run = self.tasks.claim('rec1', resume=True)['run_id']
         result = self.publish(run)
         self.assertEqual(len(self.api.docs), 1)
-        self.assertEqual(result['blocks'], 7)
+        self.assertEqual(result['blocks'], 8)
 
     def test_complete_document_with_failed_table_update(self):
         run = self.bound()
@@ -607,7 +636,237 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.api.rows['rec1']['fields']['笔记文档']['link'], old)
         result = self.publish(run)
         self.assertNotEqual(old, result['url'])
-        self.assertEqual(len(self.api.docs), 2)
+        self.assertEqual(set(self.api.docs), {'doc2'})
+
+    def pending_cleanup(self):
+        self.publish(self.bound())
+        run = self.bound(regenerate=True)
+        with patch.object(self.api, 'delete_document', side_effect=FeishuError('permission denied')):
+            result = self.publish(run)
+        self.assertEqual(result['status'], '已完成')
+        self.assertEqual(result['cleanup']['pending'], 1)
+        return run
+
+    def test_cleanup_only_after_completed_links_reread_and_new_images_verified(self):
+        self.use_both()
+        (self.base / 'frame.png').write_bytes(b'fixture')
+        self.note['sections'][0]['blocks'].append(
+            {'type': 'image', 'path': 'frame.png', 'caption': 'Frame', 'seconds': 5})
+        self.publish(self.bound())
+        run = self.bound(regenerate=True)
+        complete_reads = []
+        record, delete = self.api.record, self.api.delete_document
+
+        def read(record_id):
+            row = record(record_id)
+            if self.tasks.get(row, 'status') == '已完成':
+                complete_reads.append(row)
+            return row
+
+        def remove(document_id):
+            self.assertTrue(complete_reads)
+            fields = complete_reads[-1]['fields']
+            self.assertTrue(fields['笔记文档']['link'].endswith('wiki2'))
+            self.assertTrue(fields['备份文档']['link'].endswith('doc3'))
+            for did in ('doc3', 'doc4'):
+                images = [b for b in self.api.docs[did]['blocks'] if b['block_type'] == 27]
+                self.assertEqual(len(images), 1)
+                self.assertTrue(images[0]['image']['token'])
+            delete(document_id)
+
+        with patch.object(self.api, 'record', side_effect=read), patch.object(self.api, 'delete_document', side_effect=remove):
+            result = self.publish(run)
+        self.assertEqual(result['cleanup']['pending'], 0)
+        self.assertEqual(set(self.api.docs), {'doc3', 'doc4'})
+
+    def test_completion_write_failure_keeps_old_until_retry(self):
+        self.publish(self.bound())
+        run = self.bound(regenerate=True)
+        self.api.fail_complete = True
+        with self.assertRaisesRegex(RuntimeError, 'completion update'):
+            self.publish(run)
+        self.assertEqual(self.api.deletions, [])
+        self.assertEqual(set(self.api.docs), {'doc1', 'doc2'})
+        self.publish(run)
+        self.assertEqual(set(self.api.docs), {'doc2'})
+
+    def test_missing_new_image_blocks_cleanup(self):
+        (self.base / 'frame.png').write_bytes(b'fixture')
+        self.note['sections'][0]['blocks'].append(
+            {'type': 'image', 'path': 'frame.png', 'caption': 'Frame', 'seconds': 5})
+        self.publish(self.bound())
+        run = self.bound(regenerate=True)
+        update = self.api.update_record
+
+        def corrupt_after_complete(record_id, fields):
+            row = update(record_id, fields)
+            if fields.get('处理状态') == '已完成':
+                for block in self.api.docs['doc2']['blocks']:
+                    if block['block_type'] == 27:
+                        block['image'].pop('token')
+            return row
+
+        with patch.object(self.api, 'update_record', side_effect=corrupt_after_complete):
+            result = self.publish(run)
+        self.assertTrue(result['cleanup']['pending'])
+        self.assertEqual(self.api.deletions, [])
+        self.assertIn('待重试', self.tasks.get(self.api.record('rec1'), 'stage'))
+
+    def test_cleanup_failure_retries_without_creating_new_version(self):
+        run = self.pending_cleanup()
+        row = self.api.record('rec1')
+        self.assertEqual(self.tasks.get(row, 'status'), '已完成')
+        self.assertTrue(self.tasks.get(row, 'document')['link'].endswith('doc2'))
+        self.assertIn('待重试', self.tasks.get(row, 'stage'))
+        result = VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)
+        self.assertEqual(result, {'pending': 0, 'deleted': 1, 'warnings': []})
+        self.assertEqual(self.api.doc_sequence, 2)
+        self.assertEqual(set(self.api.docs), {'doc2'})
+
+    def test_remote_image_download_failure_or_hash_mismatch_keeps_old_version(self):
+        (self.base / 'frame.png').write_bytes(b'fixture')
+        self.note['sections'][0]['blocks'].append(
+            {'type': 'image', 'path': 'frame.png', 'caption': 'Frame', 'seconds': 5})
+        run = self.pending_cleanup()
+        for failure in (FeishuError('image unreadable'), 'different image hash'):
+            with self.subTest(failure=str(failure)):
+                kwargs = {'side_effect': failure} if isinstance(failure, Exception) else {'return_value': failure}
+                with patch.object(self.api, 'image_sha256', **kwargs):
+                    with self.assertRaises((FeishuError, TaskError)):
+                        VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)
+                self.assertEqual(self.api.deletions, [])
+        self.assertEqual(VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)['pending'], 0)
+
+    def test_successful_completion_response_without_persisted_links_cannot_delete(self):
+        self.publish(self.bound())
+        run = self.bound(regenerate=True)
+        update = self.api.update_record
+
+        def omit_links(record_id, fields):
+            if fields.get('处理状态') == '已完成':
+                fields = {key: value for key, value in fields.items() if key != self.config.field('document')}
+            return update(record_id, fields)
+
+        with patch.object(self.api, 'update_record', side_effect=omit_links):
+            result = self.publish(run)
+        self.assertTrue(result['cleanup']['pending'])
+        self.assertEqual(self.api.deletions, [])
+        self.assertEqual(set(self.api.docs), {'doc1', 'doc2'})
+
+    def test_lost_delete_response_is_reconciled_without_second_delete(self):
+        self.publish(self.bound())
+        run = self.bound(regenerate=True)
+        delete = self.api.delete_document
+
+        def lost(document_id):
+            delete(document_id)
+            raise AmbiguousWrite('delete accepted; response lost')
+
+        with patch.object(self.api, 'delete_document', side_effect=lost):
+            result = self.publish(run)
+        self.assertEqual(result['cleanup']['pending'], 1)
+        VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)
+        self.assertEqual(self.api.deletions, ['doc1'])
+
+    def test_shared_links_results_and_active_drafts_protect_old_document(self):
+        run = self.pending_cleanup()
+        for reference in ('link', 'published', 'draft', 'document_id'):
+            with self.subTest(reference=reference):
+                fields = {}
+                if reference == 'link':
+                    fields['笔记文档'] = {'link': 'https://example.feishu.cn/docx/doc1', 'text': 'Shared'}
+                elif reference == 'document_id':
+                    fields[self.config.field('document_id')] = 'doc1'
+                else:
+                    fields['任务检查点'] = json.dumps({
+                        'published' if reference == 'published' else 'publish': {'document_id': 'doc1'}})
+                self.api.add('rec2', **fields)
+                result = VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)
+                self.assertEqual(result['pending'], 1)
+                self.assertEqual(self.api.deletions, [])
+        del self.api.rows['rec2']
+        self.assertEqual(VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)['pending'], 0)
+
+    def test_changed_owner_during_delete_does_not_overwrite_new_checkpoint(self):
+        run = self.pending_cleanup()
+
+        def switch(document_id):
+            self.api.rows['rec1']['fields'][self.config.field('run_id')] = 'new-owner'
+            self.api.rows['rec1']['fields'][self.config.field('state')] = json.dumps({'generation': 'next', 'sentinel': True})
+            raise AmbiguousWrite('ownership changed')
+
+        with patch.object(self.api, 'delete_document', side_effect=switch):
+            with self.assertRaisesRegex(TaskError, 'no longer owns'):
+                VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)
+        self.assertEqual(self.tasks.state(self.api.record('rec1')), {'generation': 'next', 'sentinel': True})
+
+    def test_cleanup_rejects_changed_table_links_input_and_current_ids(self):
+        run = self.pending_cleanup()
+        original = copy.deepcopy(self.api.rows['rec1'])
+        for key, value in [('document', {'link': 'https://example.feishu.cn/docx/manual'}),
+                           ('requirements', 'changed input'), ('run_id', 'another-owner')]:
+            with self.subTest(key=key):
+                self.api.rows['rec1'] = copy.deepcopy(original)
+                self.api.rows['rec1']['fields'][self.config.field(key)] = value
+                with self.assertRaises(TaskError):
+                    VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)
+                self.assertEqual(self.api.deletions, [])
+        self.api.rows['rec1'] = original
+        state = self.tasks.state(original)
+        state['version_cleanup'][0]['document_id'] = 'doc2'
+        self.tasks.save_state('rec1', state)
+        with self.assertRaisesRegex(TaskError, 'current document'):
+            VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)
+        self.assertEqual(self.api.deletions, [])
+
+    def test_pending_cleanup_carries_into_next_generation(self):
+        self.pending_cleanup()
+        result = self.publish(self.bound(regenerate=True))
+        self.assertEqual(result['cleanup']['deleted'], 2)
+        self.assertEqual(set(self.api.docs), {'doc3'})
+
+    def test_pending_cleanup_survives_failed_generation(self):
+        self.publish(self.bound())
+        run = self.bound(regenerate=True)
+        self.api.fail_append_at = 2
+        with self.assertRaises(AmbiguousWrite):
+            self.publish(run)
+        self.tasks.fail('rec1', run, 'failed')
+        result = self.publish(self.bound(regenerate=True))
+        self.assertEqual(result['cleanup']['deleted'], 1)
+        self.assertIn('doc3', self.api.docs)
+        self.assertNotIn('doc1', self.api.docs)
+
+    def test_manual_links_and_legacy_metadata_are_not_deleted(self):
+        self.publish(self.bound())
+        original = copy.deepcopy(self.api.rows['rec1'])
+        self.api.rows['rec1']['fields']['笔记文档'] = {'link': 'https://example.feishu.cn/docx/manual'}
+        self.assertNotIn('version_cleanup', self.tasks.claim('rec1', regenerate=True)['state'])
+        self.api.rows['rec1'] = original
+        state = self.tasks.state(original)
+        state['published'].pop('destination')
+        self.tasks.save_state('rec1', state)
+        self.assertNotIn('version_cleanup', self.tasks.claim('rec1', regenerate=True)['state'])
+        self.assertEqual(self.api.deletions, [])
+
+    def test_wiki_page_with_children_keeps_cleanup_pending(self):
+        self.use_wiki()
+        self.publish(self.bound())
+        self.api.wiki_nodes['wiki1']['has_child'] = True
+        result = self.publish(self.bound(regenerate=True))
+        self.assertEqual(result['cleanup']['pending'], 1)
+        self.assertEqual(self.api.deletions, [])
+
+    def test_wiki_cleanup_requires_node_disappearance_without_second_delete(self):
+        self.use_wiki()
+        self.publish(self.bound())
+        run = self.bound(regenerate=True)
+        with patch.object(self.api, 'wiki_node_deleted', return_value=False):
+            result = self.publish(run)
+        self.assertEqual(result['cleanup']['pending'], 1)
+        self.assertEqual(self.api.deletions, ['doc1'])
+        self.assertEqual(VersionCleanup(self.tasks).run('rec1', run, self.note, self.base)['pending'], 0)
+        self.assertEqual(self.api.deletions, ['doc1'])
 
     def test_input_change_rejected_and_old_run_cannot_write(self):
         run = self.bound()
@@ -644,7 +903,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(resumed['state']['generation'], before['generation'])
         self.assertEqual(self.api.rows['rec1']['fields']['工作文档ID'], 'doc2')
         self.publish(resumed['run_id'])
-        self.assertEqual(len(self.api.docs), 2)
+        self.assertEqual(set(self.api.docs), {'doc2'})
 
     def test_unknown_create_error_keeps_creation_guard(self):
         run = self.bound()
@@ -678,6 +937,46 @@ class WorkflowTests(unittest.TestCase):
         self.note['sections'][0]['blocks'] = [{'type': 'text', 'text': 'x', 'seconds': float('nan')}]
         with self.assertRaises(ValueError):
             validate_note(self.note, self.base)
+
+    def test_missing_screenshots_blocks_new_publication_before_document_creation(self):
+        self.note.pop('text_only_reason')
+        with self.assertRaisesRegex(ValueError, 'no screenshots'):
+            validate_note(self.note, self.base)
+        with self.assertRaisesRegex(ValueError, 'no screenshots'):
+            self.publish(self.bound())
+        self.assertEqual(self.api.docs, {})
+
+    def test_text_only_reason_is_visible_in_document_and_markdown(self):
+        from vfnlib.notes import markdown
+        result = self.publish(self.bound())
+        self.assertEqual(result['note_quality']['images'], 0)
+        self.assertTrue(result['warnings'])
+        self.assertIn(self.note['text_only_reason'], markdown(self.note, SOURCE))
+        content = json.dumps(self.api.docs, ensure_ascii=False)
+        self.assertIn('未附截图原因：' + self.note['text_only_reason'], content)
+
+    def test_legacy_text_only_result_is_not_reused(self):
+        self.publish(self.bound())
+        state = self.tasks.state(self.api.record('rec1'))
+        state['published'].pop('note_quality')
+        self.tasks.save_state('rec1', state)
+        self.api.add('rec2')
+        run = self.tasks.claim('rec2')['run_id']
+        result = self.tasks.bind('rec2', run, {'request': SOURCE['url'], 'source': SOURCE})
+        self.assertFalse(result['reused'])
+
+    def test_frozen_legacy_text_only_draft_can_resume(self):
+        from unittest.mock import patch
+        from vfnlib.notes import validate_note as check
+        self.note.pop('text_only_reason')
+        run = self.bound()
+        self.api.fail_append_at = 3
+        with patch('vfnlib.publish.validate_note', side_effect=lambda n, b, **kw: check(n, b, require_images=False)):
+            with self.assertRaises(AmbiguousWrite):
+                self.publish(run)
+        result = self.publish(self.tasks.claim('rec1', resume=True)['run_id'])
+        self.assertEqual(result['status'], '已完成')
+        self.assertEqual(result['blocks'], 7)
 
     def test_task_selection_failure_disabled_and_limit(self):
         self.api.add('rec2', 处理状态='失败')

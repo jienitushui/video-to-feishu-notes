@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import hashlib
 import os
 import time
 from urllib.parse import quote
@@ -8,7 +10,9 @@ import requests
 
 
 class FeishuError(RuntimeError):
-    pass
+    def __init__(self, message, *, code=None, status=None):
+        super().__init__(message)
+        self.code, self.status = code, status
 
 
 class AmbiguousWrite(FeishuError):
@@ -77,7 +81,8 @@ class Feishu:
                 raise (FeishuError if safe else AmbiguousWrite)('Invalid Feishu response') from exc
             if response.status_code >= 400 or payload.get('code', 0) != 0:
                 raise FeishuError('Feishu code=' + str(payload.get('code', response.status_code)) +
-                                  ': ' + str(payload.get('msg', 'Request failed')))
+                                  ': ' + str(payload.get('msg', 'Request failed')),
+                                  code=payload.get('code'), status=response.status_code)
             return payload.get('data', payload)
         raise FeishuError('Request retry limit reached')
 
@@ -126,6 +131,40 @@ class Feishu:
     def document(self, document_id):
         return self.request('GET', '/docx/v1/documents/' + quote(document_id, safe=''))['document']
 
+    def document_deleted(self, document_id):
+        try:
+            self.document(document_id)
+        except FeishuError as exc:
+            if exc.code in (1770002, 1770003):
+                return True
+            raise
+        return False
+
+    def delete_document(self, document_id):
+        # Deletion goes to Feishu's recycle bin. Do not replay an uncertain DELETE.
+        return self.request('DELETE', '/drive/v1/files/' + quote(document_id, safe=''), params={'type': 'docx'})
+
+    def image_sha256(self, token):
+        try:
+            response = self.session.request(
+                'GET', self.base + '/drive/v1/medias/' + quote(token, safe='') + '/download',
+                headers={'Authorization': 'Bearer ' + self.access_token()}, timeout=(10, 90))
+            if response.status_code != 200:
+                raise FeishuError('Image download failed: HTTP ' + str(response.status_code),
+                                  status=response.status_code)
+            return hashlib.sha256(response.content).hexdigest()
+        except requests.RequestException as exc:
+            raise FeishuError('Image download interrupted; preserve old version and retry cleanup') from exc
+
+    def wiki_node_deleted(self, token):
+        try:
+            self.wiki_node(token)
+        except FeishuError as exc:
+            if exc.code == 131005:
+                return True
+            raise
+        return False
+
     def create_document(self, title):
         return self.request('POST', '/docx/v1/documents',
                             body={'title': title, 'folder_token': self.config.require('folder_token')})['document']
@@ -173,7 +212,9 @@ class Feishu:
         with path.open('rb') as handle:
             payload = self.request('POST', '/drive/v1/medias/upload_all',
                                    data={'file_name': path.name, 'parent_type': 'docx_image',
-                                         'parent_node': document_id, 'size': str(path.stat().st_size)},
+                                         # docx_image attaches to the image block, not the document root.
+                                         'parent_node': block_id, 'size': str(path.stat().st_size),
+                                         'extra': json.dumps({'drive_route_token': document_id})},
                                    files={'file': (path.name, handle, 'application/octet-stream')})
         token = payload['file_token']
         self.request('PATCH', '/docx/v1/documents/{}/blocks/{}'.format(
