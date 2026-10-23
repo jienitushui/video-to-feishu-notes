@@ -72,8 +72,10 @@ def _format_timestamp(seconds: float) -> str:
 
 
 def _ranges(duration: float, chunk_seconds: float, overlap_seconds: float) -> list[dict]:
-    if duration <= 0:
+    if not math.isfinite(duration) or duration <= 0:
         raise ValueError("Audio duration must be positive for chunked transcription")
+    if not math.isfinite(chunk_seconds) or chunk_seconds <= 0 or not math.isfinite(overlap_seconds) or overlap_seconds < 0:
+        raise ValueError('Chunk size must be positive and overlap nonnegative')
     ranges = []
     index = 0
     core_start = 0.0
@@ -123,6 +125,7 @@ def run_chunked_transcription(
     overlap_seconds: float = 0.3,
     max_chunks_per_run: int = 3,
     audio_identity: str | None = None,
+    asr_options: dict | None = None,
 ) -> dict:
     """逐片执行 ASR，并在每片完成后原子保存 checkpoint。
 
@@ -130,16 +133,23 @@ def run_chunked_transcription(
     max_chunks_per_run=0 表示本次处理全部剩余片段。
     """
     audio_path = Path(audio_path)
+    if max_chunks_per_run < 0:
+        raise ValueError('max_chunks_per_run must be nonnegative')
     output_path = Path(output_path)
     work_dir = Path(work_dir)
     checkpoint_dir = work_dir / "chunk-checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = work_dir / "chunk-manifest.json"
     fingerprint = _fingerprint(audio_path, chunk_seconds, overlap_seconds, audio_identity)
+    if asr_options is not None:
+        fingerprint['asr_options'] = asr_options
     ranges = _ranges(float(duration), chunk_seconds, overlap_seconds)
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("fingerprint") != fingerprint:
+        # Duration is not implied by file size or stable source identity. Compare
+        # the full plan so a changed duration cannot silently reuse old chunks.
+        if (manifest.get("fingerprint") != fingerprint or
+                manifest.get("duration") != duration or manifest.get("ranges") != ranges):
             raise ValueError("Existing chunk checkpoints belong to a different audio or chunk plan")
     else:
         manifest = {
@@ -153,17 +163,45 @@ def run_chunked_transcription(
         }
         atomic_json(manifest_path, manifest)
 
-    completed = set(manifest.get("completed", []))
+    from .transcripts import inspect_text
+    # Reconcile all files before applying the budget. A missing checkpoint must
+    # never count as completed simply because the manifest still lists it.
+    completed = set()
+    silence = []
+    for item in ranges:
+        checkpoint = checkpoint_dir / f"chunk-{item['index']:03d}.json"
+        if not checkpoint.exists():
+            continue
+        try:
+            saved = json.loads(checkpoint.read_text(encoding='utf-8'))
+            text = saved.get('text')
+            _, report = inspect_text(text, item['window_end'] - item['window_start']) if isinstance(text, str) else ([], {'passed': False})
+            if (all(saved.get(key) == item[key] for key in item) and
+                    (report['passed'] or text == '')):
+                completed.add(item['index'])
+                if text == '':
+                    silence.append(item['index'])
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
     added = 0
     for item in ranges:
         index = item["index"]
         checkpoint = checkpoint_dir / f"chunk-{index:03d}.json"
-        if index in completed and checkpoint.exists():
+        if index in completed:
             continue
         if max_chunks_per_run and added >= max_chunks_per_run:
             break
         text = transcribe_window(item["window_start"], item["window_end"], index)
-        payload = dict(item, text=text or "", completed_at=round(time.time(), 3), duration=duration)
+        if not isinstance(text, str):
+            raise ValueError('ASR returned a non-text transcript')
+        _, report = inspect_text(text, item['window_end'] - item['window_start'])
+        if text.strip() and not report['passed']:
+            atomic_json(work_dir / 'chunk-quality-failure.json', dict(index=index, **report))
+            raise ValueError('Chunk transcript quality check failed: ' + ', '.join(report['hard_failures']))
+        if not text.strip():
+            text = ''
+            silence.append(index)
+        payload = dict(item, text=text, completed_at=round(time.time(), 3), duration=duration)
         atomic_json(checkpoint, payload)
         completed.add(index)
         manifest["completed"] = sorted(completed)
@@ -179,6 +217,16 @@ def run_chunked_transcription(
             checkpoint_values.append(json.loads(checkpoint.read_text(encoding="utf-8")))
     _merge_checkpoints(checkpoint_values, output_path)
     complete = len(completed) == len(ranges)
+    _, quality = inspect_text(output_path.read_text(encoding='utf-8'), duration)
+    quality['silent_chunk_candidates'] = sorted(silence)
+    if silence:
+        quality['warnings'].append('empty_chunks_may_be_silent: review audio')
+    atomic_json(work_dir / 'transcription-quality.json', quality)
+    if complete and not quality['passed']:
+        output_path.with_name(output_path.name + '.done').unlink(missing_ok=True)
+        manifest.update(status='quality_failed', completed=sorted(completed), quality=quality)
+        atomic_json(manifest_path, manifest)
+        raise ValueError('Transcript quality check failed: ' + ', '.join(quality['hard_failures']))
     manifest["status"] = "prepared" if complete else "transcribing"
     manifest["completed"] = sorted(completed)
     manifest["remaining"] = max(0, len(ranges) - len(completed))
@@ -187,6 +235,8 @@ def run_chunked_transcription(
     if complete:
         done = output_path.with_name(output_path.name + ".done")
         atomic_json(done, {"size": output_path.stat().st_size, "done_at": round(time.time(), 3), "marker_version": 1})
+    else:
+        output_path.with_name(output_path.name + '.done').unlink(missing_ok=True)
     return {
         "status": manifest["status"],
         "manifest": str(manifest_path),
@@ -194,6 +244,7 @@ def run_chunked_transcription(
         "completed": len(completed),
         "total": len(ranges),
         "remaining": manifest["remaining"],
+        "quality": quality,
     }
 
 
@@ -250,12 +301,47 @@ def _window_wav(audio_path: Path, start: float, end: float, destination: Path) -
                     wav.writeframes(converted.to_ndarray().tobytes())
 
 
+def normalize_language(language):
+    if not isinstance(language, str) or not re.fullmatch(r'auto|[a-z]{2,3}', language):
+        raise ValueError('ASR language must be auto or a Whisper language code such as zh/en/ja')
+    # Check against the installed ASR vocabulary without loading a model.
+    try:
+        from faster_whisper.tokenizer import _LANGUAGE_CODES
+    except ImportError:
+        _LANGUAGE_CODES = None
+    if language != 'auto' and _LANGUAGE_CODES is not None and language not in _LANGUAGE_CODES:
+        raise ValueError('Unsupported Whisper language: ' + language)
+    return language
+
+
+def build_hotwords(metadata, selected, terms=None):
+    if terms is not None and (not isinstance(terms, list) or any(not isinstance(t, str) for t in terms)):
+        raise ValueError('asr_hotwords must be a list of strings')
+    owner = metadata.get('owner', '')
+    if isinstance(owner, dict):
+        owner = owner.get('name', '')
+    words, seen, length = [], set(), 0
+    # Explicit terminology first so long titles cannot crowd it out.
+    for value in [*(terms or []), metadata.get('title'), owner, selected.get('part')]:
+        value = re.sub(r'https?://\S+', '', str(value or ''))
+        value = re.sub(r'\s+', ' ', value).strip()[:100]
+        if value and value.casefold() not in seen and length + len(value) <= 400:
+            seen.add(value.casefold())
+            words.append(value)
+            length += len(value)
+        if len(words) >= 20:
+            break
+    return words
+
+
 def transcribe_page_chunked(meta_file: Path, page: int, output_dir: Path, upstream_script: Path,
-                            *, max_chunks_per_run: int = 3) -> dict:
+                            *, max_chunks_per_run: int = 3, language: str = 'auto', hotwords=None,
+                            whole_file: bool = False) -> dict:
     """对一个已选中的分P执行可恢复 ASR。"""
     try:
         module = _load_upstream(upstream_script)
-        import av  # noqa: F401  # checked explicitly for a useful fallback error
+        if not whole_file:
+            import av  # noqa: F401
     except (ImportError, ModuleNotFoundError) as exc:
         raise ChunkedTranscriptionUnavailable(str(exc)) from exc
     meta = json.loads(Path(meta_file).read_text(encoding="utf-8"))
@@ -264,30 +350,51 @@ def transcribe_page_chunked(meta_file: Path, page: int, output_dir: Path, upstre
         raise ValueError(f"Selected page does not exist: {page}")
     selected = pages[0]
     output_dir = Path(output_dir)
+    language = normalize_language(language)
+    terms = build_hotwords(meta, selected, hotwords)
+    model = module._cfg("asr_model", "small")
+    device = module._cfg("asr_device", "auto")
+    options = {'language': language, 'hotwords': terms, 'model': model, 'device': device}
+    settings_file = output_dir / 'asr-settings.json'
+    if settings_file.exists():
+        if json.loads(settings_file.read_text(encoding='utf-8')) != options:
+            raise ValueError('ASR settings changed; restore language/hotwords or use a new version')
+    else:
+        legacy_manifest = output_dir / 'chunk-manifest.json'
+        if legacy_manifest.exists():
+            prior = json.loads(legacy_manifest.read_text(encoding='utf-8'))
+            if 'asr_options' not in prior.get('fingerprint', {}):
+                raise ValueError('Legacy ASR checkpoints lack language/hotword identity; use a new version')
+        atomic_json(settings_file, options)
     audio = output_dir / f".chunk-audio-{page:02d}.m4s"
     if selected.get("media_path"):
         audio = output_dir / selected["media_path"]
-    else:
+    elif not audio.is_file() or audio.stat().st_size == 0:
         cookie = module.load_sessdata()
         module.download_audio(meta["bvid"], selected["cid"], audio, cookie)
     output = output_dir / f"{page:02d}_{module.safe_name(selected['part'])}.txt"
-    model = module._cfg("asr_model", "small")
-    device = module._cfg("asr_device", "auto")
     duration = float(selected.get("duration") or _audio_duration(audio))
     state = module.load_model(model, device)
 
     def transcribe_window(start: float, end: float, index: int) -> str:
+        if whole_file:
+            return module.transcribe(audio, model, None if language == 'auto' else language, device, terms=terms)
         with tempfile.TemporaryDirectory(prefix=f"vfn-chunk-{index:03d}-", dir=output_dir) as temp:
             wav = Path(temp) / "window.wav"
             _window_wav(audio, start, end, wav)
-            return module.transcribe(wav, model, "zh", device)
+            return module.transcribe(wav, model, None if language == 'auto' else language, device, terms=terms)
 
     result = run_chunked_transcription(
         audio, output, output_dir, transcribe_window, duration=duration,
+        chunk_seconds=max(duration, 300) if whole_file else 300,
         max_chunks_per_run=max_chunks_per_run,
-        audio_identity=f"{meta.get('bvid') or meta.get('video_id')}:{page}")
-    if audio.name.startswith(".chunk-audio-"):
+        audio_identity=f"{meta.get('bvid') or meta.get('video_id')}:{page}", asr_options=options)
+    # A bounded run must retain its downloaded audio for the next invocation;
+    # remove it only after every chunk has been committed.
+    if result.get("status") == "prepared" and audio.name.startswith(".chunk-audio-"):
         audio.unlink(missing_ok=True)
     result["model_used"] = state.get("model_used")
     result["device_used"] = state.get("device_used")
+    result['asr_options'] = options
+    result['fallback_reasons'] = state.get('fallback_reasons', [])
     return result

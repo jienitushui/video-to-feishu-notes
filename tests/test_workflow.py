@@ -16,6 +16,7 @@ from vfnlib.publish import Publisher
 from vfnlib.cleanup import VersionCleanup
 from vfnlib.tasks import Tasks, TaskError
 from vfnlib.video import classify, safe_part
+from vfnlib.transcripts import retain_transcript
 
 
 class MemoryFeishu:
@@ -173,6 +174,21 @@ class WorkflowTests(unittest.TestCase):
 
     def publish(self, run, record='rec1'):
         return self.publisher.publish(record, run, self.note, self.base)
+
+    def test_invalid_retained_material_stops_before_document_creation(self):
+        run = self.bound()
+        original = self.base / 'source.txt'
+        original.write_text('[00:00] Source evidence', encoding='utf-8')
+        retained = retain_transcript(original, self.base, SOURCE, 'subtitle')
+        material = dict(source=SOURCE, transcription={'status': 'prepared'}, **retained)
+        (self.base / 'manifest.json').write_text(json.dumps(material), encoding='utf-8')
+        raw = self.base / 'transcripts/raw.txt'
+        raw.write_text('[00:00] Changed source', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'transcript changed'):
+            self.publish(run)
+        self.assertEqual(self.api.docs, {})
+        raw.write_text('[00:00] Source evidence', encoding='utf-8')
+        self.assertEqual(self.publish(run)['status'], '已完成')
 
     def use_wiki(self):
         self.config.data.update(publish_target='wiki', wiki_space_id='123',

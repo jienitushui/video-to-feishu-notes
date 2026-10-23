@@ -1,6 +1,6 @@
 # video-to-feishu-notes
 
-将 B站、抖音教程整理成图文课堂笔记，通过飞书多维表格管理任务，沉淀到飞书文档。
+将 B站、抖音课程、播客和访谈整理成图文笔记，通过飞书多维表格管理任务，沉淀到飞书文档。
 
 **当前状态：首版实现，可进行配置与联调。** 已包含 Skill、飞书 API 适配、视频工具适配和离线测试；支持仅云盘、仅知识库、同时归档两处三种模式，真实飞书端到端验证需要配置应用授权、任务表与归档目标。
 
@@ -25,10 +25,13 @@ flowchart LR
 
 - 支持 B站单条视频或单个分 P，以及抖音视频。
 - 字幕优先，无字幕时使用本地语音识别。
+- 完整字幕与转写稿通过结构质检后保留原稿；可选校正版独立保存，检查段数、时间点和字符保留率，发布前核验留存文件。
+- ASR 默认自动检测语言，支持显式语言与术语提示；参数随检查点固定，短视频和长视频均支持。
 - 提取重点画面，生成章节笔记、知识地图、概念卡片和自测题。
+- 播客、访谈按主题、观点与论据、适用边界和回看索引组织，不强套课堂自测模板。
 - 素材准备默认提取截图候选；没有字幕或关键词时按时间分布抽帧。Agent 视觉复核后将图片插入对应小节，新笔记无图且未说明原因时会被校验和发布拦截。
 - 将笔记与图片写入飞书文档；默认在知识库保存主文档、在云盘文件夹保存生成时的备份副本，也支持仅云盘或仅知识库。
-- 支持去重、重新生成、有限重试和中断恢复。
+- 支持去重、重新生成、有限重试和中断恢复。长视频分片 ASR 的 `doctor` 会报告依赖就绪情况；分批续跑时保留临时音频，完成后清理，并校验分片计划与检查点匹配。
 - 由用户主动启动，单执行者串行处理。
 - 本地工作文件统一按 `output/<record_id>/v<生成版本>/` 保存；任务完成后可用 `cleanup-local` 预览并清理旧版本，默认不触碰当前版本或旧式平铺目录。
 
@@ -60,6 +63,16 @@ python -m pip install -r cache/upstream/requirements.txt
 ```powershell
 python scripts/vfn.py video prepare "<视频链接>" --record-id <record_id> --version <生成版本> --transcribe --screenshots
 ```
+
+中文明确时可加 `--asr-language zh`，外语或混合内容默认 `auto`；用重复的 `--hotword NVIDIA --hotword CUDA` 添加术语。也可在 config.json 配置 `asr_language` 和 `asr_hotwords`；笔记展示语言仍由 `language` 独立控制。续跑保留相同设置，旧版缺少参数身份的未完成 ASR 检查点需另建版本。
+
+素材目录下的 `transcripts/raw.txt` 和 `raw.segments.json` 保留来源原文。需要校正时按 [转写说明](references/transcripts.md) 编写 corrections.json，再运行：
+
+```powershell
+python scripts/vfn.py video finalize-transcript --manifest output/<record_id>/v<生成版本>/manifest.json --corrections output/<record_id>/v<生成版本>/corrections.json
+```
+
+成功后 `manifest.transcript` 指向独立校正版，原稿保持不变。结构质检不证明听写正确，仍须核对关键内容；原稿和校正版默认只在本地留存。播客写作见 [播客笔记模板](references/podcast-notes.md)。
 
 任务完成后清理本地旧版本（先预览，确认后再加 `--apply`）：
 

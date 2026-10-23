@@ -10,7 +10,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
-from .transcription import ChunkedTranscriptionUnavailable, transcribe_page_chunked
+from .transcription import (ChunkedTranscriptionUnavailable, transcribe_page_chunked,
+                            normalize_language, build_hotwords, atomic_json)
+from .transcripts import retain_transcript, verify_material_transcript
 
 UPSTREAM_URL = 'https://github.com/lucky-Luor/bilibili-douyin-notes.git'
 UPSTREAM_REVISION = '2497a7f564670c840f5e1c4055c8a536237cd5f3'
@@ -76,7 +78,15 @@ def choose_page(metadata, page):
     return matches[0]
 
 
-def prepare(config, request, output, transcribe=False, screenshots=True, max_chunks_per_run=3):
+def prepare(config, request, output, transcribe=False, screenshots=True, max_chunks_per_run=3,
+            asr_language=None, hotwords=None):
+    if max_chunks_per_run < 0:
+        raise ValueError('max_chunks_per_run must be nonnegative')
+    language = normalize_language(asr_language if asr_language is not None else config.get('asr_language', 'auto'))
+    configured_terms = config.get('asr_hotwords', [])
+    if not isinstance(configured_terms, list) or any(not isinstance(t, str) for t in configured_terms):
+        raise ValueError('asr_hotwords must be a list of strings')
+    terms = configured_terms + (hotwords or [])
     if sys.version_info < (3, 10):
         raise ValueError('Video processing requires Python 3.10 or newer')
     upstream = config.local_path('upstream_path', 'cache/upstream')
@@ -118,46 +128,77 @@ def prepare(config, request, output, transcribe=False, screenshots=True, max_chu
     selected_meta = dict(metadata, platform=platform, pages=[selected], duration=selected.get('duration', 0))
     meta_file = out / 'selected-metadata.json'
     meta_file.write_text(json.dumps(selected_meta, ensure_ascii=False, indent=2), encoding='utf-8')
+    settings_file = out / 'asr-settings.json'
+    if settings_file.exists():
+        settings = json.loads(settings_file.read_text(encoding='utf-8'))
+        if settings['language'] != language or settings['hotwords'] != build_hotwords(metadata, selected, terms):
+            raise ValueError('ASR settings changed; restore language/hotwords or use a new version')
     transcript = out / ('{:02d}_{}.txt'.format(page, safe_part(selected['part'])))
     warnings = []
-    transcription = {'mode': 'existing_or_upstream', 'status': 'not_requested',
-                     'max_chunks_per_run': max_chunks_per_run}
+    previous_manifest = out / 'manifest.json'
+    previous = json.loads(previous_manifest.read_text(encoding='utf-8')) if previous_manifest.exists() else {}
+    transcription = previous.get('transcription') or {'mode': 'existing_or_upstream', 'status': 'not_requested',
+                                                     'max_chunks_per_run': max_chunks_per_run}
     chunk_manifest = out / 'chunk-manifest.json'
     chunk_pending = False
     if chunk_manifest.exists():
         try:
-            chunk_pending = json.loads(chunk_manifest.read_text(encoding='utf-8')).get('status') != 'prepared'
+            chunk_state = json.loads(chunk_manifest.read_text(encoding='utf-8'))
+            chunk_pending = chunk_state.get('status') != 'prepared'
+            transcription = dict(transcription, status=chunk_state['status'],
+                                 completed=len(chunk_state.get('completed', [])),
+                                 remaining=chunk_state.get('remaining'), manifest=str(chunk_manifest))
         except (OSError, ValueError, TypeError):
             chunk_pending = True
+            transcription = dict(transcription, status='transcribing')
     if transcribe and (not transcript.exists() or not transcript.read_text(encoding='utf-8').strip() or chunk_pending):
         # 长内容优先走可恢复的分片 ASR；短内容保留上游路径，避免额外的音频切片开销。
         duration = float(selected.get('duration') or 0)
-        if duration > 300 and max_chunks_per_run >= 0:
+        if duration > 300:
             try:
                 transcription = transcribe_page_chunked(
                     meta_file, page, out, scripts / 'bili_transcribe.py',
-                    max_chunks_per_run=max_chunks_per_run)
+                    max_chunks_per_run=max_chunks_per_run, language=language, hotwords=terms)
                 transcription['mode'] = 'chunked'
             except ChunkedTranscriptionUnavailable as exc:
-                transcription = {'mode': 'upstream_fallback', 'status': 'fallback',
-                                 'reason': str(exc), 'max_chunks_per_run': max_chunks_per_run}
-                warnings.append('Chunked ASR unavailable; fell back to upstream whole-file transcription: ' + str(exc))
-                run([sys.executable, str(scripts / 'bili_transcribe.py'), str(meta_file), '--page', str(page)])
+                if chunk_manifest.exists():
+                    raise RuntimeError('Cannot switch an existing chunk plan to whole-file ASR; restore ASR dependencies') from exc
+                transcription = transcribe_page_chunked(
+                    meta_file, page, out, scripts / 'bili_transcribe.py', max_chunks_per_run=max_chunks_per_run,
+                    language=language, hotwords=terms, whole_file=True)
+                transcription.update(mode='upstream_fallback', reason=str(exc))
+                warnings.append('Chunked ASR unavailable; whole-file ASR retained language/hotwords: ' + str(exc))
             except Exception:
                 # ASR 本身的错误应保留给调用方处理，不能把部分 checkpoint 误报成完整结果。
                 raise
         else:
-            run([sys.executable, str(scripts / 'bili_transcribe.py'), str(meta_file), '--page', str(page)])
+            transcription = transcribe_page_chunked(
+                meta_file, page, out, scripts / 'bili_transcribe.py', max_chunks_per_run=max_chunks_per_run,
+                language=language, hotwords=terms, whole_file=True)
             transcription['mode'] = 'upstream_whole_file'
-            transcription['status'] = 'completed'
     available = transcript.exists() and bool(transcript.read_text(encoding='utf-8').strip())
-    if transcription.get('mode') == 'chunked' and transcription.get('status') != 'prepared':
+    if chunk_pending and not transcribe:
         available = False
-    if transcribe and not available and not (transcription.get('mode') == 'chunked' and
-                                             transcription.get('status') == 'transcribing'):
+    if transcription.get('status') in ('transcribing', 'quality_failed'):
+        available = False
+    if transcribe and not available and transcription.get('status') != 'transcribing':
         raise RuntimeError('Upstream returned without producing a usable transcript; inspect upstream output')
     if not available:
         warnings.append('No usable transcript; rerun with --transcribe after installing ASR dependencies')
+    if platform == 'bilibili':
+        video_id = metadata['bvid']
+        canonical = 'https://www.bilibili.com/video/{}?p={}'.format(video_id, page)
+        key = 'bilibili:{}:p{}'.format(video_id, page)
+    else:
+        video_id = metadata['video_id']
+        canonical = 'https://www.douyin.com/video/' + video_id
+        key = 'douyin:' + video_id
+    source = {'key': key, 'platform': platform, 'video_id': video_id, 'page': page, 'url': canonical,
+              'title': metadata['title'] + (' / ' + selected['part'] if page != 1 else ''),
+              'owner': metadata.get('owner', ''), 'duration': selected.get('duration', 0)}
+    retained = retain_transcript(transcript, out, source, transcription.get('mode')) if available else {}
+    warnings.extend(retained.get('transcript_quality', {}).get('warnings', []))
+    warnings.extend(transcription.get('quality', {}).get('warnings', []))
     image_manifest = None
     screenshot_status = 'not_requested'
     if screenshots:
@@ -165,7 +206,7 @@ def prepare(config, request, output, transcribe=False, screenshots=True, max_chu
         try:
             helper = Path(__file__).with_name('screenshots.py')
             run([sys.executable, str(helper), str(scripts / 'bili_screenshot.py'), str(meta_file),
-                 str(transcript), str(out / 'images')])
+                 retained.get('transcript', str(transcript)), str(out / 'images')])
             candidate = out / 'images/manifest.json'
             if candidate.exists():
                 image_manifest = str(candidate)
@@ -179,21 +220,13 @@ def prepare(config, request, output, transcribe=False, screenshots=True, max_chu
                 warnings.append('Screenshot extraction did not produce a manifest')
         except (RuntimeError, OSError, ValueError) as exc:
             warnings.append('Screenshot extraction failed: ' + str(exc))
-    if platform == 'bilibili':
-        video_id = metadata['bvid']
-        canonical = 'https://www.bilibili.com/video/{}?p={}'.format(video_id, page)
-        key = 'bilibili:{}:p{}'.format(video_id, page)
-    else:
-        video_id = metadata['video_id']
-        canonical = 'https://www.douyin.com/video/' + video_id
-        key = 'douyin:' + video_id
-    source = {'key': key, 'platform': platform, 'video_id': video_id, 'page': page, 'url': canonical,
-              'title': metadata['title'] + (' / ' + selected['part'] if page != 1 else ''),
-              'owner': metadata.get('owner', ''), 'duration': selected.get('duration', 0)}
     manifest = {'schema_version': 1, 'request': request, 'source': source, 'upstream_revision': actual,
                 'metadata': str(meta_file), 'transcript': str(transcript) if available else None,
                 'image_manifest': image_manifest, 'screenshot_status': screenshot_status,
                 'transcription': transcription, 'warnings': warnings}
+    manifest.update(retained)
+    if available:
+        verify_material_transcript(manifest, out)
     target = out / 'manifest.json'
-    target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+    atomic_json(target, manifest)
     return dict(manifest, manifest=str(target))

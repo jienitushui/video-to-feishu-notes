@@ -26,6 +26,10 @@ prepare 输出 selected-metadata.json 和 manifest.json。转写和截图只处�
 
 理解与写作由宿主 Agent 完成，无需同时部署两个项目。
 
+## 本地 bilibili-transcriber v1.6.5 参考
+
+参考用户提供的旧 Skill 中原稿/校正版分离、结构质检、字符保留率提示、元数据术语提示和播客观点组织原则。本仓库在现有适配层独立实现，不运行旧 Skill，不引入其手机知识库接口、强制 HTML 或固定 ASR 模型约束。默认沿用当前固定上游的模型加载和 `terms` 接口；不修改上游 checkout。
+
 ## 飞书接口依据
 
 适配器依据开放平台与官方 larksuite/oapi-sdk-python 模型检查请求结构。部署前需在实际租户上进行小规模联调。

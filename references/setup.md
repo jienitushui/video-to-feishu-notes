@@ -270,6 +270,8 @@ CLI 使用 `.env.local` 中的 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 换取租
 
 prepare 的原始输入必须与任务一致。有些上游脚本出错仍返回零退出码，适配器还检查实际转写文件。命令成功输出 ok=true 和 data；失败输出 ok=false、error_type、error 并退出 1。doctor 的 ok=true 表示检查已执行，配置完整性应看具体检查项。
 
+ASR 参数：`asr_language` 默认 `auto`；`asr_hotwords` 为可选术语字符串数组，独立于笔记展示语言 `language`。命令行 `--asr-language` 覆盖语言，重复 `--hotword` 追加术语；续跑保持设置一致。短视频整段、长视频分片均传入这些设置。原稿、校正版留存与 `video finalize-transcript` 使用见 [transcripts.md](transcripts.md)。这些本地命令不发布飞书文档。
+
 ## MCP 适配
 
 有飞书写入工具的 Agent 可按 table-schema.md 与 state-and-recovery.md 的协议直接操作；需要图片上传和文档回读能力。CLI 是默认实现，不假定任意 MCP 都支持同名操作。只有只读能力时应报告缺失的写入能力。

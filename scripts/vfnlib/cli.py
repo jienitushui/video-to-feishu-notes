@@ -16,6 +16,7 @@ from .publish import Publisher
 from .tasks import Tasks
 from .video import prepare, install_upstream
 from .local_cleanup import apply_cleanup, canonical_version_dir, plan_cleanup
+from .transcripts import finalize_transcript
 
 
 def parser():
@@ -82,6 +83,9 @@ def parser():
     export.add_argument('--manifest', required=True)
     export.add_argument('--output', required=True)
     video = sub.add_parser('video').add_subparsers(dest='action', required=True)
+    finalize = video.add_parser('finalize-transcript', help='Validate corrections while retaining the source transcript')
+    finalize.add_argument('--manifest', required=True)
+    finalize.add_argument('--corrections', required=True)
     install = video.add_parser('install-upstream')
     install.add_argument('--target')
     prep = video.add_parser('prepare')
@@ -91,6 +95,8 @@ def parser():
     prep.add_argument('--version', type=int, help='Feishu generation version used for the canonical local work directory')
     prep.add_argument('--output-root', default='output', help='Root for canonical local work directories')
     prep.add_argument('--transcribe', action='store_true')
+    prep.add_argument('--asr-language', help='Whisper language code, e.g. zh/en/ja; auto detects per window (default auto)')
+    prep.add_argument('--hotword', action='append', help='Terminology hint; repeat for several terms, frozen during resume')
     prep.add_argument('--max-chunks-per-run', type=int, default=3,
                       help='长视频单次最多新增的 ASR 片段数；0 表示本次处理全部片段')
     prep.add_argument('--screenshots', action=argparse.BooleanOptionalAction, default=True,
@@ -100,6 +106,8 @@ def parser():
 
 def execute(args):
     cmd = args.command
+    if cmd == 'video' and args.action == 'finalize-transcript':
+        return finalize_transcript(args.manifest, args.corrections)
     if cmd == 'validate-note':
         note, base = load_note(args.note)
         return validate_note(note, base)
@@ -129,7 +137,7 @@ def execute(args):
             output = str(canonical_version_dir(
                 config.local_path('output_root', args.output_root), args.record_id, args.version))
         return prepare(config, args.url, output, args.transcribe, args.screenshots,
-                       args.max_chunks_per_run)
+                       args.max_chunks_per_run, args.asr_language, args.hotword)
     api = Feishu(config)
     tasks = Tasks(api, config)
     if cmd == 'doctor':
@@ -143,11 +151,18 @@ def execute(args):
                          for k in ('app_token', 'table_id', *destination_keys))
         auth = bool((os.getenv('FEISHU_APP_ID') and os.getenv('FEISHU_APP_SECRET')) or
                     os.getenv('FEISHU_USER_ACCESS_TOKEN') or os.getenv('FEISHU_TENANT_ACCESS_TOKEN'))
+        upstream_transcriber = config.local_path('upstream_path', 'cache/upstream') / 'scripts/bili_transcribe.py'
+        asr_missing = [name for name, ready in (
+            ('upstream_transcriber', upstream_transcriber.is_file()),
+            ('av', importlib.util.find_spec('av') is not None),
+            ('faster_whisper', importlib.util.find_spec('faster_whisper') is not None),
+        ) if not ready]
         report = {'python': sys.version.split()[0], 'python_executable': sys.executable,
                   'config_ready': configured, 'auth_configured': auth,
                   'publish_target': config.get('publish_target', 'folder'),
                   'upstream_installed': (config.local_path('upstream_path', 'cache/upstream') / 'scripts/bili_fetch.py').is_file(),
                   'optional_modules': {m: importlib.util.find_spec(m) is not None for m in ('av', 'faster_whisper', 'gmssl', 'numpy', 'PIL')},
+                  'asr_ready': not asr_missing, 'asr_missing': asr_missing,
                   'remote_checked': False}
         if args.remote:
             report['schema'] = tasks.schema()

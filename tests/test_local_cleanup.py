@@ -11,7 +11,9 @@ from vfnlib.local_cleanup import apply_cleanup, canonical_version_dir, plan_clea
 class LocalCleanupTests(unittest.TestCase):
     def test_preview_and_apply_keep_current_and_unknown_versions(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            # Match the cleanup API's canonical paths: macOS /var may resolve
+            # to /private/var, and Windows TEMP may use an 8.3 short name.
+            root = Path(temp).resolve()
             for version in (1, 2, 3):
                 path = canonical_version_dir(root, 'rec1', version)
                 path.mkdir(parents=True)
@@ -31,7 +33,7 @@ class LocalCleanupTests(unittest.TestCase):
 
     def test_incomplete_task_is_blocked(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             path = canonical_version_dir(root, 'rec1', 1)
             path.mkdir(parents=True)
             plan = plan_cleanup(root, 'rec1', 2, '处理中')

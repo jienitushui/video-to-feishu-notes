@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import time
 import uuid
+from pathlib import Path
 
 from .feishu import AmbiguousWrite, FeishuError
 from .notes import plan_note, validate_note
 from .tasks import TaskError, digest
+from .transcripts import read_json, verify_material_transcript
 
 
 def signature(block):
@@ -50,6 +52,12 @@ class Publisher:
         source = state.get('source')
         if not source or note['source_key'] != source['key']:
             raise TaskError('Bind a matching source before publishing')
+        material_file = Path(base) / 'manifest.json'
+        if material_file.exists():
+            material = read_json(material_file)
+            if material['source']['key'] != source['key']:
+                raise TaskError('Note and local material source mismatch')
+            verify_material_transcript(material, base)
         quality = validate_note(note, base, require_images=not bool(state.get('publish', {}).get('hash')))
         marker = 'VFN task={} generation={}'.format(record_id, state['generation'])
         plan = plan_note(note, base, source, marker)
