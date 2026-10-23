@@ -153,9 +153,83 @@ macOS/Linux 在填写真实密钥前运行 `chmod 600 .env.local`，仅允许文
 
 schema 默认只返回缺失字段；--apply 创建缺失字段，不删除已有字段。已有同名字段类型不兼容时停止，可配置 fields 映射。表格视图、隐藏列和展示顺序由用户按偏好调整。
 
+### 主列与空白行
+
+飞书新建多维表格时会自动创建一个名为“文本”的主列，并可能预留几条空白记录。建议将这个主列重命名为“任务名称”，并在 `config.json` 中保留映射：
+
+```json
+"fields": {
+  "task_name": "任务名称"
+}
+```
+
+项目将这列映射为 `task_name`：`enqueue` 创建任务时先写入分享文本，`bind-source` 成功后更新为视频标题。这样第一列不会长期为空；前五行等历史空记录不会被 `schema --apply` 自动删除。
+
+清理历史空记录前先预览：
+
+```powershell
+.\.venv\Scripts\vfn.exe --env-file .env.local --config config.json cleanup-empty
+```
+
+确认候选记录确实为空后，再加 `--apply` 删除。该命令只匹配所有字段都为空的记录，不碰已提交、处理中或已完成的任务；“文本”列仍可在飞书界面手动改名，改名后在 `config.json` 中配置 `fields.task_name` 与新名称。
+
 doctor --remote 只读检查表格字段及目标目录：wiki 模式校验父节点所属知识空间，folder 模式列举文件夹，both 模式分别检查两处。读取成功不代表有创建权限，报告中 write_access_checked 为 false；首次实际发布再验证写入。
 
 API 回读只能确认当前调用身份可访问。首次发布后请用户实际打开文档，确认知识库或文件夹的成员权限满足阅读需求。工具不会自动公开分享。
+
+## 常见权限问题与排障记录
+
+本节记录一次真实联调中遇到的两个权限问题。它们通常不是代码或 `config.json` 写错，而是应用版本、资源协作权限和 API 权限没有同时生效。
+
+### 云盘文件夹返回 `1061004: forbidden`
+
+本项目采用应用身份直连资源，不需要创建群、不需要启用机器人，也不需要把机器人加入群。打开目标云盘文件夹，选择「分享」→「邀请协作者」，直接搜索“视频笔记助手”应用并授予**可管理**。然后在「权限管理」确认已开通读取云空间文件夹清单，以及创建/编辑文档、上传素材所需权限；修改权限后，在「版本管理与发布」创建并**正式发布**新版本。
+
+如果分享窗口无法搜索到应用，先检查应用类型和租户是否允许文档应用直授权；不要把“机器人入群”当作本项目的默认依赖。当前目标租户已验证应用可以直接加入文件夹，项目群权限已移除。
+
+检查命令：
+
+```powershell
+.\.venv\Scripts\vfn.exe --env-file .env.local --config config.json doctor --remote
+```
+
+恢复后应看到 `destination.readable: true`。`write_access_checked: false` 是只读检查的正常结果，首次 `publish` 才会验证写权限。
+
+### `schema --apply` 返回 `91403: Forbidden`
+
+1. 在「权限管理」添加多维表格新增字段权限，权限标识通常为 `base:field:create`，然后发布新版本。
+2. 打开目标多维表格，右上角「分享」→「邀请协作者」，直接搜索当前自建应用/文档应用，权限设为**可管理**并发送邀请；不需要机器人入群。
+3. 重新运行：
+
+```powershell
+.\.venv\Scripts\vfn.exe --env-file .env.local --config config.json schema --apply
+```
+
+成功时 `missing` 必须为空；`created: 0` 也可能是成功，表示字段已经存在。命令只补字段，不删除旧字段、不改视图、不迁移历史链接。
+
+### 权限排查顺序
+
+飞书权限有三层：开放平台 API 权限、已正式发布的应用版本、目标文件夹/知识库/多维表格中的资源协作权限。缺一层都可能返回 `Forbidden`。确认三层后，再运行 `schema` 和 `doctor --remote`。
+
+本次联调的最终状态：应用版本 `1.0.2` 已发布；多维表格、知识库父页面和云盘文件夹均已直接将“视频笔记助手”应用设为可管理；`schema --apply` 的 `missing` 为空；项目群权限已移除，`doctor --remote` 仍显示两个目标 `readable: true`，并已成功完成知识库主文档 + 云盘备份双归档。这证明当前租户可以完全不创建项目群运行本项目。
+
+### 直连模式的最终配置
+
+CLI 使用 `.env.local` 中的 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 换取租户令牌，所有 API 请求直接由自建应用身份发出。群不会转发接口请求，也不需要承接云盘权限。
+
+需要满足三项：
+
+- 开放平台已正式发布包含多维表格、知识库、云盘文件和文档读写能力的应用版本；
+- 应用本身已被直接加入目标多维表格、知识库父页面和云盘文件夹，并授予“可管理”；
+- `config.json` 填写 `app_token`、`table_id`、`wiki_space_id`、`wiki_parent_node_token` 和 `folder_token`，`publish_target` 使用 `both`。
+
+验证命令：
+
+```powershell
+.\\.venv\\Scripts\\vfn.exe --env-file .env.local --config config.json doctor --remote
+```
+
+看到 `destination.type` 为 `both`，且 folder/wiki 两个目标均为 `readable: true`，就可以直接运行项目；全程不需要群，也不需要机器人加入群。
 
 ## 视频处理工具
 
@@ -163,6 +237,16 @@ API 回读只能确认当前调用身份可访问。首次发布后请用户实�
     python -m pip install -r cache/upstream/requirements.txt
 
 默认固定提交 2497a7f564670c840f5e1c4055c8a536237cd5f3。目录已存在时停止，不覆盖。可配置已有上游目录，但版本须匹配，详见 upstream.md。首次下载 ASR 模型需要网络与磁盘空间；无字幕转写、截图才需要完整媒体依赖。
+
+抖音额外说明：固定版本的上游抖音脚本需要使用者自行获取 GPLv3 的 `abogus.py`，项目不会把它打包进仓库。运行抖音流程时若提示缺少该文件，请将固定 commit 对应文件放到 `cache/upstream/scripts/abogus.py`；脚本会校验 SHA-256、关键标记和 Python 编译结果。抖音签名还需要 `gmssl`：
+
+    python -m pip install gmssl
+
+若启用无字幕本地转写和截图，还需要上游 requirements 中的 `faster-whisper`、`av`、`numpy`、`pillow`。本次联调还发现固定上游脚本与最新 PyAV 不兼容：出现 `open() got an unexpected keyword argument 'metadata_errors'` 时，将 PyAV 调整到兼容版本，例如：
+
+    python -m pip install --force-reinstall --only-binary=:all: av==12.3.0
+
+安装后可用 `doctor` 检查 `optional_modules`，再重新运行 `video prepare --transcribe --screenshots`。
 
 主 Skill 不自动登录平台，不自动删除媒体缓存。B站登录由用户按需执行上游 bili_fetch.py --login，授权信息保存在上游本地配置。
 

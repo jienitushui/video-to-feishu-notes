@@ -17,8 +17,15 @@ def signature(block):
     runs = []
     for element in payload.get('elements', []):
         run = element.get('text_run', {})
-        runs.append({'text': run.get('content', ''),
-                     'link': run.get('text_element_style', {}).get('link', {}).get('url')})
+        link = run.get('text_element_style', {}).get('link', {}).get('url')
+        text = run.get('content', '')
+        # Feishu may split one text block into adjacent runs at newline
+        # boundaries.  Compare the semantic text, while preserving link
+        # boundaries for linked content.
+        if runs and runs[-1]['link'] == link:
+            runs[-1]['text'] += text
+        else:
+            runs.append({'text': text, 'link': link})
     return {'block_type': kind, 'runs': runs}
 
 

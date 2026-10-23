@@ -114,6 +114,9 @@ class Feishu:
         return self.request('POST', self.table_path + '/records',
                             body={'fields': fields}, params={'client_token': token})['record']
 
+    def delete_record(self, record_id):
+        return self.request('DELETE', self.table_path + '/records/' + quote(record_id, safe=''))
+
     def fields(self):
         return list(self.paginate(self.table_path + '/fields'))
 

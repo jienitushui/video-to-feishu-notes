@@ -34,6 +34,34 @@ class Tasks:
     def put(self, record_id, values):
         return self.api.update_record(record_id, {self.config.field(k): v for k, v in values.items()})
 
+    @staticmethod
+    def _empty_value(value):
+        if value is None or value is False or value == '':
+            return True
+        if isinstance(value, (list, tuple, dict)):
+            if not value:
+                return True
+            if isinstance(value, dict):
+                return not any(str(v).strip() for v in value.values() if v is not None)
+        return False
+
+    @classmethod
+    def is_empty_record(cls, record):
+        return not any(not cls._empty_value(value)
+                       for value in record.get('fields', {}).values())
+
+    def cleanup_empty(self, apply=False, limit=100):
+        if limit < 1 or limit > 100:
+            raise ValueError('limit must be 1..100')
+        candidates = [r for r in self.api.records() if self.is_empty_record(r)][:limit]
+        result = {'candidates': [r['record_id'] for r in candidates],
+                  'deleted': 0, 'applied': bool(apply)}
+        if apply:
+            for record in candidates:
+                self.api.delete_record(record['record_id'])
+                result['deleted'] += 1
+        return result
+
     def snapshot(self, record):
         return {'url': text(self.get(record, 'url')).strip(),
                 'requirements': text(self.get(record, 'requirements')).strip(),
@@ -179,8 +207,8 @@ class Tasks:
         if state.get('fingerprint') and state['fingerprint'] != fingerprint:
             raise TaskError('Source changed within this generation')
         state.update(source=source, fingerprint=fingerprint)
-        self.save_state(record_id, state, source_key=key, fingerprint=fingerprint,
-                        title=source['title'], platform=source['platform'])
+        self.save_state(record_id, state, task_name=source['title'], source_key=key,
+                        fingerprint=fingerprint, title=source['title'], platform=source['platform'])
         if not state.get('force') and not state.get('publish'):
             for other in self.api.records():
                 if other['record_id'] == record_id or self.get(other, 'status') != '已完成':

@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # Records are read/written by field name, optionally mapped in config.json.
 FIELDS = {
+    # The first/primary Bitable column is created by Feishu as “文本”.
+    # Keep it as a logical task name so newly-created rows are never blank.
+    'task_name': ('文本', 1),
     'url': ('视频链接', 1), 'enabled': ('开始生成', 7),
     'status': ('处理状态', 3), 'stage': ('当前阶段', 1),
     'title': ('视频标题', 1), 'platform': ('视频平台', 1),

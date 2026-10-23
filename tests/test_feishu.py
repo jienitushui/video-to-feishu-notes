@@ -62,6 +62,12 @@ class FeishuTests(unittest.TestCase):
         self.assertEqual(api.update_record('rec', {'处理状态': '处理中'})['record_id'], 'rec')
         self.assertEqual(session.calls[0][2]['json'], session.calls[1][2]['json'])
 
+    def test_record_delete_uses_record_endpoint(self):
+        api, session = self.api([Response({'code': 0, 'data': {}})])
+        api.delete_record('rec1')
+        self.assertEqual(session.calls[0][0], 'DELETE')
+        self.assertTrue(session.calls[0][1].endswith('/records/rec1'))
+
     def test_wiki_create_uses_native_docx_node_and_no_folder(self):
         node = {'node_token': 'wiki1', 'obj_token': 'doc1'}
         api, session = self.api([Response({'code': 0, 'data': {'node': node}})])

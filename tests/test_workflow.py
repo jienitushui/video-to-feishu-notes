@@ -119,6 +119,25 @@ class WorkflowTests(unittest.TestCase):
                      'sections': [{'id': 'intro', 'title': 'Introduction',
                                    'blocks': [{'type': 'text', 'text': 'Explanation', 'seconds': 3}]}]}
 
+    def test_empty_record_cleanup_only_matches_blank_rows(self):
+        class CleanupApi(MemoryFeishu):
+            def __init__(self):
+                super().__init__()
+                self.rows['blank'] = {'record_id': 'blank', 'fields': {}}
+                self.deleted = []
+
+            def delete_record(self, record_id):
+                self.deleted.append(record_id)
+
+        api = CleanupApi()
+        tasks = Tasks(api, self.config)
+        preview = tasks.cleanup_empty()
+        self.assertEqual(preview['candidates'], ['blank'])
+        self.assertEqual(api.deleted, [])
+        applied = tasks.cleanup_empty(apply=True)
+        self.assertEqual(applied['deleted'], 1)
+        self.assertEqual(api.deleted, ['blank'])
+
     def bound(self, record='rec1', **kwargs):
         claim = self.tasks.claim(record, **kwargs)
         run = claim['run_id']

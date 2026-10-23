@@ -26,6 +26,9 @@ def parser():
     doctor.add_argument('--remote', action='store_true')
     schema = sub.add_parser('schema', help='Plan missing Bitable fields; --apply creates missing fields')
     schema.add_argument('--apply', action='store_true')
+    cleanup = sub.add_parser('cleanup-empty', help='List empty Bitable rows; --apply deletes them')
+    cleanup.add_argument('--apply', action='store_true')
+    cleanup.add_argument('--limit', type=int, default=100)
     tasks = sub.add_parser('tasks')
     tasks.add_argument('--limit', type=int, default=3)
     tasks.add_argument('--category')
@@ -122,6 +125,8 @@ def execute(args):
         return report
     if cmd == 'schema':
         return tasks.schema(args.apply)
+    if cmd == 'cleanup-empty':
+        return tasks.cleanup_empty(args.apply, args.limit)
     if cmd == 'wiki-node':
         return {'node': api.wiki_node(args.token, args.obj_type)}
     if cmd == 'tasks':
@@ -132,7 +137,7 @@ def execute(args):
     if cmd == 'enqueue':
         from .video import classify
         classify(args.url)
-        fields = {'url': args.url, 'enabled': args.enabled, 'status': '待处理',
+        fields = {'task_name': args.url.strip()[:200], 'url': args.url, 'enabled': args.enabled, 'status': '待处理',
                   'requirements': args.requirements, 'category': args.category}
         token = str(uuid.uuid4())
         record = api.create_record({config.field(k): v for k, v in fields.items()}, token)
